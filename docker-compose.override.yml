@@ -15,3 +15,8 @@ services:
       - --port
       - "8000"
       - --reload
+
+  worker:
+    volumes:
+      - ./app:/app/app
+      - ./alembic:/app/alembic
