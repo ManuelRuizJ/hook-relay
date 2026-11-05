@@ -227,3 +227,5 @@ venv/
 .ruff_cache/
 *.db
 .DS_Store
+venv
+venv/
