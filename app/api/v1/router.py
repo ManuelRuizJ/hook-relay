@@ -1,0 +1,6 @@
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import webhook_endpoints
+
+api_router = APIRouter()
+api_router.include_router(webhook_endpoints.router)

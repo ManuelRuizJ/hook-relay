@@ -7,3 +7,5 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+venv
+alembic/__pycache__/
