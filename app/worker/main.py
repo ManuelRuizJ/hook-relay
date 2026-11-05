@@ -13,6 +13,9 @@ from app.core.redis import close_redis_client, get_redis_client
 from app.models.event import Event
 from app.models.webhook_endpoint import WebhookEndpoint
 from app.worker.delivery import HTTP_TIMEOUT, deliver_event
+from app.repositories.event_repository import EventRepository
+from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
+from app.services.event_service import EventService
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +49,28 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
             )
             return
         event, endpoint = row
-        await deliver_event(client, event, endpoint)
 
+        # Claim the event before the network call so a concurrent worker
+        # (Phase 5+) cannot also pick it up.
+        service = EventService(
+            session=session,
+            event_repo=EventRepository(session),
+            endpoint_repo=WebhookEndpointRepository(session),
+            redis=get_redis_client(),
+        )
+        await service.mark_in_progress(event)
+
+        result = await deliver_event(client, event, endpoint)
+
+        if result.success:
+            await service.mark_delivered(event)
+        else:
+            await service.mark_failed(event, result.error or "unknown error")
+            logger.info(
+                "Event %s marked failed after %d attempt(s)",
+                event.id,
+                event.attempts,
+            )
 
 async def run_worker(shutdown: asyncio.Event) -> None:
     redis = get_redis_client()

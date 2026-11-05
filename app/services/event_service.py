@@ -1,5 +1,6 @@
 import logging
 from uuid import UUID
+from datetime import datetime, timezone
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -70,3 +71,42 @@ class EventService:
         if event is None:
             raise EventNotFound(event_id)
         return event
+
+    async def _transition(
+        self,
+        event: Event,
+        *,
+        new_status: EventStatus,
+        attempts_delta: int,
+        last_error: str | None = None,
+        delivered_at: datetime | None = None,
+    ) -> Event:
+        event.status = new_status
+        event.attempts += attempts_delta
+        event.last_error = last_error
+        if delivered_at is not None:
+            event.delivered_at = delivered_at
+        updated = await self.event_repo.update(event)
+        await self.session.commit()
+        return updated
+
+    async def mark_in_progress(self, event: Event) -> Event:
+        return await self._transition(
+            event, new_status=EventStatus.IN_PROGRESS, attempts_delta=1
+        )
+
+    async def mark_delivered(self, event: Event) -> Event:
+        return await self._transition(
+            event,
+            new_status=EventStatus.DELIVERED,
+            attempts_delta=0,
+            delivered_at=datetime.now(timezone.utc),
+        )
+
+    async def mark_failed(self, event: Event, error: str) -> Event:
+        return await self._transition(
+            event,
+            new_status=EventStatus.FAILED,
+            attempts_delta=0,
+            last_error=error,
+        )

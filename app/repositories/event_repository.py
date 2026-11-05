@@ -17,3 +17,8 @@ class EventRepository:
 
     async def get_by_id(self, event_id: UUID) -> Event | None:
         return await self.session.get(Event, event_id)
+
+    async def update(self, event: Event) -> Event:
+        await self.session.flush()
+        await self.session.refresh(event)
+        return event
