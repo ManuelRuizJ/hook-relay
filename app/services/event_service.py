@@ -1,5 +1,6 @@
 import logging
 from uuid import UUID
+from datetime import datetime, timezone, timedelta
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -15,6 +16,7 @@ from app.services.exceptions import (
     WebhookEndpointInactive,
     WebhookNotFound,
 )
+from app.worker.backoff import compute_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -70,3 +72,48 @@ class EventService:
         if event is None:
             raise EventNotFound(event_id)
         return event
+
+    async def _transition(
+        self,
+        event: Event,
+        *,
+        new_status: EventStatus,
+        attempts_delta: int,
+        last_error: str | None = None,
+        delivered_at: datetime | None = None,
+    ) -> Event:
+        event.status = new_status
+        event.attempts += attempts_delta
+        event.last_error = last_error
+        if delivered_at is not None:
+            event.delivered_at = delivered_at
+        updated = await self.event_repo.update(event)
+        await self.session.commit()
+        return updated
+
+    async def mark_in_progress(self, event: Event) -> Event:
+        return await self._transition(
+            event, new_status=EventStatus.IN_PROGRESS, attempts_delta=1
+        )
+
+    async def mark_delivered(self, event: Event) -> Event:
+        return await self._transition(
+            event,
+            new_status=EventStatus.DELIVERED,
+            attempts_delta=0,
+            delivered_at=datetime.now(timezone.utc),
+        )
+
+    async def mark_failed(self, event: Event, error: str) -> Event:
+        event.last_error = error
+        if event.attempts >= event.max_attempts:
+            event.status = EventStatus.FAILED
+        else:
+            backoff_seconds = compute_backoff(event.attempts)
+            event.status = EventStatus.PENDING
+            event.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+                seconds=backoff_seconds
+            )
+        updated = await self.event_repo.update(event)
+        await self.session.commit()
+        return updated
