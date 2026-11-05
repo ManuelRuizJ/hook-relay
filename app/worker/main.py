@@ -14,6 +14,7 @@ from app.core.redis import close_redis_client, get_redis_client
 from app.models.event import Event, EventStatus
 from app.models.webhook_endpoint import WebhookEndpoint
 from app.worker.delivery import HTTP_TIMEOUT, deliver_event
+from app.worker.reaper import reaper_loop
 from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.services.event_service import EventService
@@ -117,6 +118,12 @@ async def reap_delayed(redis) -> int:
 async def run_worker(shutdown: asyncio.Event) -> None:
     redis = get_redis_client()
     logger.info("Worker started; waiting on %s", WEBHOOK_DELIVERY_QUEUE)
+
+    reaper_task = asyncio.create_task(
+        reaper_loop(SessionLocal, redis), name="orphan-reaper"
+    )
+    logger.info("Orphan reaper started (30s interval)")
+
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         try:
             while not shutdown.is_set():
@@ -130,6 +137,11 @@ async def run_worker(shutdown: asyncio.Event) -> None:
                 await _handle_event(client, event_id)
         finally:
             logger.info("Worker shutting down")
+            reaper_task.cancel()
+            try:
+                await reaper_task
+            except asyncio.CancelledError:
+                pass
             await close_redis_client()
 
 
