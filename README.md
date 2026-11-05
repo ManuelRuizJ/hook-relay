@@ -41,5 +41,4 @@ GET /api/v1/endpoints?skip=0&limit=100
 GET /api/v1/endpoints/{id}
 PATCH /api/v1/endpoints/{id}
 DELETE /api/v1/endpoints/{id}
-
-TODO
+```
