@@ -33,9 +33,11 @@ flowchart LR
     Worker -->|on failure: ZADD next_attempt_at| D[(Redis webhooks:delayed)]
     Worker -.->|reaper: ZRANGEBYSCORE now| D
     D -.->|LPUSH when due| Q
+    Reaper[Orphan reaper] -.->|every 30s: stale pending| PG
+    Reaper -->|LPUSH event_id| Q
 ```
 
-PostgreSQL is the source of truth: an event is committed before it is enqueued. If Redis is unavailable, the event stays pending and the Phase 5 reaper re-enqueues it. This provides at-least-once delivery, so receivers must be idempotent.
+PostgreSQL is the source of truth: an event is committed before it is enqueued. If Redis is unavailable, or a worker stops between `BRPOP` and claiming the event, the event stays `pending` in PostgreSQL and the orphan reaper re-enqueues it. This provides at-least-once delivery, so receivers must be idempotent.
 
 ## How to run
 
@@ -136,6 +138,8 @@ pending ──claim──▶ in_progress ──success──▶ delivered
 
 `in_progress` represents an active claim. It lets the reaper distinguish an event being delivered from one abandoned by a worker that stopped unexpectedly.
 
+**Orphan recovery:** a `pending` event whose `next_attempt_at` is more than 30s in the past has no path back to the queue (the worker died before claiming it, or `LPUSH` failed after the commit). The orphan reaper runs every 30s inside the worker, pushes `next_attempt_at` forward another 30s and re-enqueues the event. `in_progress` events are not touched by this reaper.
+
 **Retry backoff:** 2s → 4s → 8s → 16s, capped at 5 minutes, with 0–10% jitter to reduce thundering-herd effects.
 
 ## Signed deliveries
@@ -181,6 +185,8 @@ The following implementation decisions are useful to understand when reviewing t
 
 - **Delayed retries with a sorted set.** Failed events are added to `webhooks:delayed`, with `next_attempt_at` as the score. A reaper uses `ZRANGEBYSCORE`, `ZREM` and `LPUSH` to return due events to the queue. This avoids sleeping inside the worker.
 
+- **Orphan reaper as a sibling task.** A second asyncio task in the worker process scans PostgreSQL every 30s for stale `pending` events (batches of 100, oldest first) using `SELECT ... FOR UPDATE SKIP LOCKED`, so several reapers never double-enqueue. It advances `next_attempt_at` before `LPUSH` to avoid re-picking the same event on the next cycle. A failed cycle is logged and retried; it never stops the worker, and the task is cancelled cleanly on shutdown.
+
 - **Flat `/events/{id}` route.** Event IDs are UUIDs, so the parent endpoint is not required to retrieve an event.
 
 - **Secret returned once.** Only the response schema used by `POST /endpoints` exposes the signing secret. Listing and retrieving endpoints do not return it.
@@ -225,7 +231,13 @@ Check whether the worker is running:
 docker compose ps
 ```
 
-If a worker stopped after retrieving a message but before marking the event as `in_progress`, the event may remain pending. The Phase 5 reaper is intended to recover this situation; verify that this recovery behavior is implemented before relying on it.
+If a worker stopped after retrieving a message but before marking the event as `in_progress`, the event remains pending. The orphan reaper re-enqueues it within about a minute (30s staleness threshold + 30s interval). Confirm it in the worker logs:
+
+```bash
+docker compose logs worker | grep -iE "orphan|re-queued"
+```
+
+If no `Re-queued N orphaned event(s)` line appears, look for `Reaper cycle failed` in the same logs.
 
 ### Two workers are processing the queue
 
