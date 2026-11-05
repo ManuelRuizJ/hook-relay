@@ -39,6 +39,12 @@ services:
       - .env
     ports:
       - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       db:
         condition: service_healthy
@@ -50,6 +56,5 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-
 volumes:
   postgres_data:

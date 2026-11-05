@@ -229,3 +229,6 @@ venv/
 .DS_Store
 venv
 venv/
+
+# .
+alembic/__pycache__/
