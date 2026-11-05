@@ -6,14 +6,19 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 
 FROM python:3.12-slim
 
+ARG UID=1000
+ARG GID=1000
+
 WORKDIR /app
 
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN groupadd -r -g ${GID} appuser && useradd -r -u ${UID} -g appuser appuser
 
 COPY --from=builder /root/.local /home/appuser/.local
 COPY ./app ./app
 COPY ./alembic ./alembic
 COPY ./alembic.ini ./alembic.ini
+COPY ./pyproject.toml ./pyproject.toml
+COPY ./tests ./tests
 
 RUN chown -R appuser:appuser /app
 USER appuser
