@@ -13,9 +13,9 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 ## Roadmap
 
 - [x] Repository bootstrap
-- [ ] PostgreSQL + Redis in Docker Compose
-- [ ] Minimal FastAPI with `/health`
-- [ ] Multi-stage Dockerfile
+- [x] PostgreSQL + Redis in Docker Compose
+- [x] Minimal FastAPI with `/health`
+- [x] Multi-stage Dockerfile
 - [ ] Webhook endpoint CRUD
 - [ ] Event ingestion
 - [ ] Delivery worker with retries
