@@ -24,17 +24,15 @@ services:
       retries: 5
 
   api:
-    build: .
+    build:
+      context: .
+      args:
+        UID: ${HOST_UID:-1000}
+        GID: ${HOST_GID:-1000}
     env_file:
       - .env
     ports:
       - "${API_PORT:-8000}:8000"
-    volumes:
-      - ./app:/app/app
-      - ./tests:/app/tests
-      - ./alembic:/app/alembic
-      - ./alembic.ini:/app/alembic.ini
-      - ./pyproject.toml:/app/pyproject.toml:ro
     depends_on:
       db:
         condition: service_healthy
