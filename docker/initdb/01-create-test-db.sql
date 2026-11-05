@@ -1,0 +1,1 @@
+CREATE DATABASE hookrelay_test;
