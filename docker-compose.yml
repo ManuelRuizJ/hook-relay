@@ -7,17 +7,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
-    # Ports are intentionally NOT published to the host.
-    # To inspect the DB, use:
-    #   docker compose exec db psql -U $POSTGRES_USER -d $POSTGRES_DB
-    # To connect from a GUI client, temporarily uncomment:
-    # ports:
-    #   - "127.0.0.1:5433:5432"   # note the non-default host port
 
   redis:
     image: redis:7-alpine
@@ -27,11 +22,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # Not published to the host either. To inspect:
-    #   docker compose exec redis redis-cli
-    # Optional host access (localhost only, alternate port):
-    # ports:
-    #   - "127.0.0.1:6380:6379"
 
   api:
     build: .
