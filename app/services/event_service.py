@@ -1,6 +1,6 @@
 import logging
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -16,6 +16,7 @@ from app.services.exceptions import (
     WebhookEndpointInactive,
     WebhookNotFound,
 )
+from app.worker.backoff import compute_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +105,15 @@ class EventService:
         )
 
     async def mark_failed(self, event: Event, error: str) -> Event:
-        return await self._transition(
-            event,
-            new_status=EventStatus.FAILED,
-            attempts_delta=0,
-            last_error=error,
-        )
+        event.last_error = error
+        if event.attempts >= event.max_attempts:
+            event.status = EventStatus.FAILED
+        else:
+            backoff_seconds = compute_backoff(event.attempts)
+            event.status = EventStatus.PENDING
+            event.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+                seconds=backoff_seconds
+            )
+        updated = await self.event_repo.update(event)
+        await self.session.commit()
+        return updated

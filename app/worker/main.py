@@ -2,15 +2,16 @@ import asyncio
 import logging
 import signal
 from uuid import UUID
+import time
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import SessionLocal
-from app.core.queue import WEBHOOK_DELIVERY_QUEUE
+from app.core.queue import WEBHOOK_DELIVERY_QUEUE, WEBHOOK_DELAYED_QUEUE
 from app.core.redis import close_redis_client, get_redis_client
-from app.models.event import Event
+from app.models.event import Event, EventStatus
 from app.models.webhook_endpoint import WebhookEndpoint
 from app.worker.delivery import HTTP_TIMEOUT, deliver_event
 from app.repositories.event_repository import EventRepository
@@ -64,13 +65,54 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
 
         if result.success:
             await service.mark_delivered(event)
+            logger.info(
+                "Event %s delivered on attempt %d", event.id, event.attempts
+            )
+            return
+
+        await service.mark_failed(event, result.error or "unknown error")
+
+        if event.status == EventStatus.PENDING:
+            score = event.next_attempt_at.timestamp()
+            await get_redis_client().zadd(
+                WEBHOOK_DELAYED_QUEUE, {str(event.id): score}
+            )
+            logger.info(
+                "Event %s scheduled for retry after attempt %d (next at %s)",
+                event.id,
+                event.attempts,
+                event.next_attempt_at.isoformat(),
+            )
         else:
-            await service.mark_failed(event, result.error or "unknown error")
             logger.info(
                 "Event %s marked failed after %d attempt(s)",
                 event.id,
                 event.attempts,
             )
+
+REAP_BATCH_SIZE = 100
+
+
+async def reap_delayed(redis) -> int:
+    """Move due events from the delayed ZSET back to the delivery queue.
+
+    Each event is atomically claimed via ZREM before LPUSH so two worker
+    processes cannot double-deliver the same event.
+    """
+    now = time.time()
+    due = await redis.zrangebyscore(
+        WEBHOOK_DELAYED_QUEUE, "-inf", now, start=0, num=REAP_BATCH_SIZE
+    )
+    moved = 0
+    for event_id in due:
+        removed = await redis.zrem(WEBHOOK_DELAYED_QUEUE, event_id)
+        if removed:
+            await redis.lpush(WEBHOOK_DELIVERY_QUEUE, event_id)
+            moved += 1
+    if moved:
+        logger.info("Re-queued %d delayed event(s)", moved)
+    return moved
+
 
 async def run_worker(shutdown: asyncio.Event) -> None:
     redis = get_redis_client()
@@ -78,6 +120,7 @@ async def run_worker(shutdown: asyncio.Event) -> None:
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         try:
             while not shutdown.is_set():
+                await reap_delayed(redis)
                 result = await redis.brpop(
                     [WEBHOOK_DELIVERY_QUEUE], timeout=BRPOP_TIMEOUT_SECONDS
                 )
