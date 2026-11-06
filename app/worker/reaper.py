@@ -6,8 +6,9 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.queue import WEBHOOK_DELIVERY_QUEUE
+from app.core.queue import WEBHOOK_DELAYED_QUEUE, WEBHOOK_DELIVERY_QUEUE
 from app.models.event import Event, EventStatus
+from app.worker.backoff import compute_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,13 @@ STALE_THRESHOLD_SECONDS = 30
 
 # Batch size: avoid saturating Redis if thousands are orphaned at once.
 BATCH_SIZE = 100
+
+# How long an event may stay `in_progress` before we assume the worker that
+# claimed it is gone. A delivery is bounded by HTTP_TIMEOUT (~25s worst
+# case), so 120s leaves a wide margin and a live worker is never preempted.
+IN_PROGRESS_TIMEOUT_SECONDS = 120
+
+STUCK_IN_PROGRESS_ERROR = "worker lost claim: in_progress timeout"
 
 
 async def reap_orphaned_events(
@@ -75,24 +83,95 @@ async def reap_orphaned_events(
     return len(events)
 
 
+async def reap_stuck_in_progress(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis: Redis,
+    *,
+    timeout_seconds: int = IN_PROGRESS_TIMEOUT_SECONDS,
+    batch_size: int = BATCH_SIZE,
+) -> int:
+    """Release events whose claim outlived any plausible delivery.
+
+    A worker that dies mid-POST leaves its event `in_progress` forever.
+    `updated_at` is the claim time: mark_in_progress is the last write to
+    an in_progress row, and nothing else touches it until the outcome.
+
+    The lost claim counts as a failed attempt (attempts was already
+    incremented when the event was claimed), so the same rule as
+    EventService.mark_failed applies:
+
+    - budget left  -> pending with backoff, scheduled on webhooks:delayed;
+    - budget spent -> failed.
+
+    ZADD happens after commit. If it fails, the event is pending in the DB
+    and the orphan reaper re-enqueues it once it goes stale.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=timeout_seconds)
+
+    async with session_factory() as session:
+        stmt = (
+            select(Event)
+            .where(
+                Event.status == EventStatus.IN_PROGRESS,
+                Event.updated_at <= cutoff,
+            )
+            .order_by(Event.updated_at.asc())
+            .limit(batch_size)
+            .with_for_update(skip_locked=True)
+        )
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+
+        if not events:
+            return 0
+
+        to_retry: dict[str, float] = {}
+        for event in events:
+            event.last_error = STUCK_IN_PROGRESS_ERROR
+            if event.attempts >= event.max_attempts:
+                event.status = EventStatus.FAILED
+            else:
+                event.status = EventStatus.PENDING
+                # attempts >= 1 for any real claim; max() guards hand-edited rows.
+                event.next_attempt_at = now + timedelta(
+                    seconds=compute_backoff(max(event.attempts, 1))
+                )
+                to_retry[str(event.id)] = event.next_attempt_at.timestamp()
+        await session.commit()
+
+    if to_retry:
+        await redis.zadd(WEBHOOK_DELAYED_QUEUE, to_retry)
+
+    logger.info(
+        "Released %d stuck in_progress event(s): %d rescheduled, %d failed",
+        len(events),
+        len(to_retry),
+        len(events) - len(to_retry),
+    )
+    return len(events)
+
+
 async def reaper_loop(
     session_factory: async_sessionmaker[AsyncSession],
     redis: Redis,
     *,
     interval_seconds: int = 30,
 ) -> None:
-    """Run reap_orphaned_events forever, sleeping `interval_seconds` between cycles.
+    """Run both recovery passes forever, sleeping `interval_seconds` between cycles.
 
     Designed to run as a sibling task of the BRPOP loop. Cancelled by the
-    worker's shutdown signal.
+    worker's shutdown signal. Each pass is guarded separately so a failure
+    in one does not skip the other.
     """
     while True:
-        try:
-            await reap_orphaned_events(session_factory, redis)
-        except Exception:
-            # The reaper must not kill the worker. A transient DB/Redis
-            # error is logged and retried next cycle.
-            logger.exception("Reaper cycle failed; will retry")
+        for reap in (reap_stuck_in_progress, reap_orphaned_events):
+            try:
+                await reap(session_factory, redis)
+            except Exception:
+                # The reaper must not kill the worker. A transient DB/Redis
+                # error is logged and retried next cycle.
+                logger.exception("Reaper cycle failed in %s; will retry", reap.__name__)
         await asyncio_sleep(interval_seconds)
 
 
