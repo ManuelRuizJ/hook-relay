@@ -1,6 +1,3 @@
-import pytest
-
-
 async def _create_endpoint(client, **overrides) -> str:
     payload = {"url": "https://example.com/hooks", **overrides}
     resp = await client.post("/api/v1/endpoints", json=payload)
@@ -48,9 +45,7 @@ async def test_ingest_event_returns_404_when_endpoint_missing(client, redis_clie
 
 async def test_ingest_event_returns_409_when_endpoint_inactive(client, redis_client):
     endpoint_id = await _create_endpoint(client)
-    await client.patch(
-        f"/api/v1/endpoints/{endpoint_id}", json={"is_active": False}
-    )
+    await client.patch(f"/api/v1/endpoints/{endpoint_id}", json={"is_active": False})
 
     resp = await client.post(
         f"/api/v1/endpoints/{endpoint_id}/events",

@@ -27,9 +27,7 @@ async def test_get_endpoint_hides_secret(client):
 
 async def test_list_endpoints_pagination(client):
     for i in range(3):
-        await client.post(
-            "/api/v1/endpoints", json={"url": f"https://example.com/{i}"}
-        )
+        await client.post("/api/v1/endpoints", json={"url": f"https://example.com/{i}"})
     resp = await client.get("/api/v1/endpoints?skip=0&limit=2")
     assert resp.status_code == 200
     assert len(resp.json()) == 2
@@ -70,7 +68,5 @@ async def test_get_endpoint_not_found(client):
 
 
 async def test_create_endpoint_rejects_invalid_url(client):
-    resp = await client.post(
-        "/api/v1/endpoints", json={"url": "not-a-url"}
-    )
+    resp = await client.post("/api/v1/endpoints", json={"url": "not-a-url"})
     assert resp.status_code == 422

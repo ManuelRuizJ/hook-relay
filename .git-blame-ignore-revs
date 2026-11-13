@@ -1,0 +1,8 @@
+# Bulk, mechanical changes that `git blame` should skip.
+# GitHub reads this file automatically. Locally:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: fix ruff findings
+29e5317860aee31a047961314063c38ee45083e7
+# style: apply ruff format
+93a589c983461385e76e249e2d939492cd7a76b6

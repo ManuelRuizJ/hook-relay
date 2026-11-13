@@ -1,6 +1,6 @@
 import logging
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
-from datetime import datetime, timezone, timedelta
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -40,9 +40,7 @@ class EventService:
         self.endpoint_repo = endpoint_repo
         self.redis = redis
 
-    async def create_and_enqueue(
-        self, endpoint_id: UUID, data: EventCreate
-    ) -> Event:
+    async def create_and_enqueue(self, endpoint_id: UUID, data: EventCreate) -> Event:
         endpoint = await self.endpoint_repo.get_by_id(endpoint_id)
         if endpoint is None:
             raise WebhookNotFound(endpoint_id)
@@ -110,7 +108,7 @@ class EventService:
 
         event.status = EventStatus.PENDING
         event.attempts = 0
-        event.next_attempt_at = datetime.now(timezone.utc)
+        event.next_attempt_at = datetime.now(UTC)
         updated = await self.event_repo.update(event)
         await self.session.commit()
 
@@ -174,7 +172,7 @@ class EventService:
             event,
             new_status=EventStatus.DELIVERED,
             attempts_delta=0,
-            delivered_at=datetime.now(timezone.utc),
+            delivered_at=datetime.now(UTC),
         )
 
     async def mark_failed(self, event: Event, error: str) -> Event:
@@ -184,7 +182,7 @@ class EventService:
         else:
             backoff_seconds = compute_backoff(event.attempts)
             event.status = EventStatus.PENDING
-            event.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+            event.next_attempt_at = datetime.now(UTC) + timedelta(
                 seconds=backoff_seconds
             )
         updated = await self.event_repo.update(event)

@@ -6,8 +6,9 @@ mock EventService or the repositories: the point is to catch wiring
 bugs (missing imports, wrong deps) that a unit test of the service
 would miss.
 """
-import pytest_asyncio
+
 import httpx
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.queue import WEBHOOK_DELAYED_QUEUE, WEBHOOK_DELIVERY_QUEUE
@@ -16,6 +17,7 @@ from app.models.webhook_endpoint import WebhookEndpoint
 from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.worker.main import _handle_event
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def worker_session_factory(db_engine, monkeypatch):
@@ -33,11 +35,10 @@ async def worker_session_factory(db_engine, monkeypatch):
     monkeypatch.setattr(worker_main, "SessionLocal", Session)
     yield Session
 
+
 async def _seed_event(session, *, max_attempts: int = 5, url: str):
     ep_repo = WebhookEndpointRepository(session)
-    endpoint = await ep_repo.create(
-        WebhookEndpoint(url=url, secret="test-secret")
-    )
+    endpoint = await ep_repo.create(WebhookEndpoint(url=url, secret="test-secret"))
     await session.flush()
     event_repo = EventRepository(session)
     event = await event_repo.create(
@@ -62,9 +63,7 @@ async def _fetch_event(db_engine, event_id):
 async def test_handle_event_delivers_on_success(db_engine, redis_client):
     Session = async_sessionmaker(db_engine, expire_on_commit=False)
     async with Session() as session:
-        event = await _seed_event(
-            session, url="http://receiver.example/hooks"
-        )
+        event = await _seed_event(session, url="http://receiver.example/hooks")
         event_id = event.id
 
     def handler(request: httpx.Request) -> httpx.Response:

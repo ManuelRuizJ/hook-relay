@@ -90,9 +90,7 @@ async def test_list_filters_by_endpoint(client, db_engine, redis_client):
     await _set_status(db_engine, event_a, EventStatus.FAILED)
     await _set_status(db_engine, event_b, EventStatus.FAILED)
 
-    resp = await client.get(
-        "/api/v1/dead-letters", params={"endpoint_id": endpoint_b}
-    )
+    resp = await client.get("/api/v1/dead-letters", params={"endpoint_id": endpoint_b})
     assert resp.status_code == 200
     assert [e["id"] for e in resp.json()] == [event_b]
 
@@ -135,9 +133,7 @@ async def test_replay_rejects_events_not_dead_lettered(client, redis_client):
 
 
 async def test_replay_rejects_inactive_endpoint(client, db_engine, redis_client):
-    endpoint_id, event_id = await _dead_lettered_event(
-        client, db_engine, redis_client
-    )
+    endpoint_id, event_id = await _dead_lettered_event(client, db_engine, redis_client)
     await client.patch(f"/api/v1/endpoints/{endpoint_id}", json={"is_active": False})
 
     resp = await client.post(f"/api/v1/events/{event_id}/replay")

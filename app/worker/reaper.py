@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -46,10 +46,8 @@ async def reap_orphaned_events(
     reaper cycle does not re-pick it, then LPUSH. If the worker still
     does not pick it up, the next cycle will catch it again.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        seconds=stale_threshold_seconds
-    )
-    now = datetime.now(timezone.utc)
+    cutoff = datetime.now(UTC) - timedelta(seconds=stale_threshold_seconds)
+    now = datetime.now(UTC)
 
     async with session_factory() as session:
         stmt = (
@@ -106,7 +104,7 @@ async def reap_stuck_in_progress(
     ZADD happens after commit. If it fails, the event is pending in the DB
     and the orphan reaper re-enqueues it once it goes stale.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff = now - timedelta(seconds=timeout_seconds)
 
     async with session_factory() as session:

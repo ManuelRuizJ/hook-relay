@@ -47,9 +47,7 @@ class EventRepository:
         if endpoint_id is not None:
             stmt = stmt.where(Event.endpoint_id == endpoint_id)
         stmt = (
-            stmt.order_by(Event.updated_at.desc(), Event.id)
-            .offset(skip)
-            .limit(limit)
+            stmt.order_by(Event.updated_at.desc(), Event.id).offset(skip).limit(limit)
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())

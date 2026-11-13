@@ -1,28 +1,24 @@
+import os
+
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-import os
 
 # Isolate tests from the developer's running worker (on DB 0). If a worker
 # is consuming the delivery queue while tests run, it races the test between
 # LPUSH and LRANGE, causing flaky failures. Using a dedicated DB index
 # removes the race without requiring "stop the worker before pytest".
 # Override with TEST_REDIS_URL in CI if needed.
-os.environ["REDIS_URL"] = os.environ.get(
-    "TEST_REDIS_URL", "redis://redis:6379/15"
-)
+os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://redis:6379/15")
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.redis import close_redis_client, get_redis_client
 from app.main import app
 from app.models import Base
-from app.core.redis import close_redis_client, get_redis_client
 
-TEST_DB_URL = (
-    settings.database_url.rsplit("/", 1)[0]
-    + f"/{settings.postgres_db}_test"
-)
+TEST_DB_URL = settings.database_url.rsplit("/", 1)[0] + f"/{settings.postgres_db}_test"
+
 
 @pytest_asyncio.fixture(scope="function")
 async def db_engine():
