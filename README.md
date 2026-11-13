@@ -1,5 +1,7 @@
 # HookRelay
 
+[![CI](https://github.com/ManuelRuizJ/hook-relay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ManuelRuizJ/hook-relay/actions/workflows/ci.yml)
+
 A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
 > Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotency and a dead-letter queue.
@@ -20,7 +22,7 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 - [x] Reliability: orphan and stuck-claim recovery
 - [x] Dead-letter queue
 - [ ] Observability
-- [ ] CI
+- [x] CI
 
 ## Architecture
 
@@ -240,7 +242,27 @@ docker compose exec api alembic upgrade head
 
 # Follow worker logs
 docker compose logs -f worker
+
+# Lint and format (same ruff version as CI)
+docker run --rm -v "$PWD":/src -w /src ghcr.io/astral-sh/ruff:0.8.4 check .
+docker run --rm -v "$PWD":/src -w /src ghcr.io/astral-sh/ruff:0.8.4 format .
 ```
+
+Ruff is configured in `pyproject.toml`. It can also run from a virtualenv with `pip install -r requirements-dev.txt`. To make `git blame` skip the bulk formatting commits:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`:
+
+| Job | What it checks |
+|---|---|
+| Lint | `ruff check` and `ruff format --check` |
+| Tests | Postgres 16 and Redis 7 service containers, migrations applied from scratch, `alembic check` for model/migration drift, then `pytest` |
+| Docker image | The production Dockerfile builds |
 
 ## Troubleshooting
 
