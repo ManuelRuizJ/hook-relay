@@ -42,7 +42,11 @@ class Event(Base):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
     status: Mapped[EventStatus] = mapped_column(
-        SAEnum(EventStatus, name="event_status", values_callable=lambda e: [x.value for x in e]),
+        SAEnum(
+            EventStatus,
+            name="event_status",
+            values_callable=lambda e: [x.value for x in e],
+        ),
         default=EventStatus.PENDING,
         nullable=False,
         index=True,

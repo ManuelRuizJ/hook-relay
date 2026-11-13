@@ -1,23 +1,23 @@
 import asyncio
 import logging
 import signal
-from uuid import UUID
 import time
+from uuid import UUID
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import SessionLocal
-from app.core.queue import WEBHOOK_DELIVERY_QUEUE, WEBHOOK_DELAYED_QUEUE
+from app.core.queue import WEBHOOK_DELAYED_QUEUE, WEBHOOK_DELIVERY_QUEUE
 from app.core.redis import close_redis_client, get_redis_client
 from app.models.event import Event, EventStatus
 from app.models.webhook_endpoint import WebhookEndpoint
-from app.worker.delivery import HTTP_TIMEOUT, deliver_event
-from app.worker.reaper import reaper_loop
 from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.services.event_service import EventService
+from app.worker.delivery import HTTP_TIMEOUT, deliver_event
+from app.worker.reaper import reaper_loop
 
 logger = logging.getLogger(__name__)
 

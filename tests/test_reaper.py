@@ -9,7 +9,7 @@ attempt (rescheduled with backoff, or failed when the budget is spent);
 a recent claim belongs to a live worker and is left alone.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -52,7 +52,7 @@ async def test_reaper_requeues_stale_pending_events(db_engine, redis_client):
         # 5 minutes in the past -> orphaned
         event = await _seed_pending_event(
             session,
-            next_attempt_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            next_attempt_at=datetime.now(UTC) - timedelta(minutes=5),
         )
         event_id = event.id
 
@@ -65,7 +65,7 @@ async def test_reaper_requeues_stale_pending_events(db_engine, redis_client):
     async with Session() as session:
         refreshed = await session.get(Event, event_id)
         # Reaper pushed next_attempt_at forward to prevent immediate re-pick.
-        assert refreshed.next_attempt_at > datetime.now(timezone.utc)
+        assert refreshed.next_attempt_at > datetime.now(UTC)
 
 
 async def test_reaper_ignores_recent_pending_events(db_engine, redis_client):
@@ -74,7 +74,7 @@ async def test_reaper_ignores_recent_pending_events(db_engine, redis_client):
         # 5 seconds in the past -> not stale yet
         await _seed_pending_event(
             session,
-            next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=5),
         )
 
     moved = await reap_orphaned_events(Session, redis_client)
@@ -89,7 +89,7 @@ async def test_reaper_ignores_in_progress_events(db_engine, redis_client):
         await _seed_pending_event(
             session,
             status=EventStatus.IN_PROGRESS,
-            next_attempt_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            next_attempt_at=datetime.now(UTC) - timedelta(hours=1),
         )
 
     moved = await reap_orphaned_events(Session, redis_client)
@@ -116,7 +116,7 @@ async def _seed_in_progress_event(
         status=EventStatus.IN_PROGRESS,
         attempts=attempts,
         max_attempts=max_attempts,
-        updated_at=datetime.now(timezone.utc) - claimed_ago,
+        updated_at=datetime.now(UTC) - claimed_ago,
     )
     session.add(event)
     await session.commit()
@@ -142,7 +142,7 @@ async def test_stuck_in_progress_is_rescheduled_with_backoff(
         # The lost claim already consumed an attempt; it is not refunded.
         assert refreshed.attempts == 2
         assert refreshed.last_error == STUCK_IN_PROGRESS_ERROR
-        assert refreshed.next_attempt_at > datetime.now(timezone.utc)
+        assert refreshed.next_attempt_at > datetime.now(UTC)
 
     score = await redis_client.zscore(WEBHOOK_DELAYED_QUEUE, str(event_id))
     assert score == refreshed.next_attempt_at.timestamp()

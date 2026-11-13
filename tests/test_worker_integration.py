@@ -6,8 +6,8 @@ mock EventService or the repositories: the point is to catch wiring
 bugs (missing imports, wrong deps) that a unit test of the service
 would miss.
 """
-import pytest_asyncio
 import httpx
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.queue import WEBHOOK_DELAYED_QUEUE, WEBHOOK_DELIVERY_QUEUE
@@ -16,6 +16,7 @@ from app.models.webhook_endpoint import WebhookEndpoint
 from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.worker.main import _handle_event
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def worker_session_factory(db_engine, monkeypatch):

@@ -1,8 +1,8 @@
+import os
+
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-import os
 
 # Isolate tests from the developer's running worker (on DB 0). If a worker
 # is consuming the delivery queue while tests run, it races the test between
@@ -15,9 +15,9 @@ os.environ["REDIS_URL"] = os.environ.get(
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.redis import close_redis_client, get_redis_client
 from app.main import app
 from app.models import Base
-from app.core.redis import close_redis_client, get_redis_client
 
 TEST_DB_URL = (
     settings.database_url.rsplit("/", 1)[0]

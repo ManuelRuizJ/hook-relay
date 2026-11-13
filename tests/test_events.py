@@ -1,4 +1,3 @@
-import pytest
 
 
 async def _create_endpoint(client, **overrides) -> str:
