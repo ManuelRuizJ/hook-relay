@@ -4,11 +4,11 @@
 
 A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
-> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotency and a dead-letter queue.
+> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotency, a dead-letter queue, structured logging, Prometheus metrics and CI.
 
 ## Status
 
-🚧 Under construction — Phase 5 of 6 complete.
+✅ All 6 phases complete.
 
 ## Roadmap
 
@@ -21,7 +21,7 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 - [x] Delivery worker with retries
 - [x] Reliability: orphan and stuck-claim recovery
 - [x] Dead-letter queue
-- [ ] Observability
+- [x] Observability: JSON logs, Prometheus metrics, readiness probe
 - [x] CI
 
 ## Architecture
@@ -77,8 +77,8 @@ docker compose -f docker-compose.yml up --build -d
 
 | Service | Role | Ports |
 |---|---|---|
-| `api` | FastAPI HTTP server (ingest + query) | `8000` |
-| `worker` | BRPOP loop, delivers events and handles retries | — |
+| `api` | FastAPI HTTP server (ingest, query, DLQ, `/metrics`, health probes) | `8000` |
+| `worker` | BRPOP loop, delivers events, retries and reaper; serves its own `/metrics` | `9100` (published in dev only) |
 | `db` | PostgreSQL 16 | Internal |
 | `redis` | Redis 7 (queue + delayed sorted set) | Internal |
 
@@ -169,6 +169,86 @@ pending ──claim──▶ in_progress ──success──▶ delivered
 
 **Retry backoff:** 2s → 4s → 8s → 16s, capped at 5 minutes, with 0–10% jitter to reduce thundering-herd effects.
 
+## Observability
+
+### Logs
+
+Both services write one JSON object per line to stdout. Identifiers are fields, not just message text, so one event's history is a single filter:
+
+```bash
+docker compose logs worker --no-log-prefix | jq -c 'select(.event_id == "<id>")'
+```
+
+```json
+{"ts": "2026-11-13T04:16:01.027+00:00", "level": "INFO", "logger": "app.worker.main", "msg": "Event … scheduled for retry after attempt 1 (next at …)", "event_id": "…", "endpoint_id": "…", "attempt": 1, "next_attempt_at": "…"}
+```
+
+| Field | Where |
+|---|---|
+| `event_id`, `endpoint_id`, `attempt` | Every delivery outcome |
+| `url`, `status_code`, `duration_ms` | The HTTP call to the receiver |
+| `next_attempt_at` / `last_error` | Retries / dead-lettered events |
+| `count`, `rescheduled`, `failed` | Reaper passes |
+| `exc_info` | Tracebacks, kept inside the JSON line |
+
+Set `LOG_FORMAT=text` for human-readable lines while developing. Uvicorn's own startup and access logs go through the same formatter (the first two startup lines are printed before the app configures logging and stay in uvicorn's format).
+
+### Metrics
+
+The API and the worker are separate processes, so each exposes its own Prometheus endpoint:
+
+| Process | Endpoint | Metric | Meaning |
+|---|---|---|---|
+| API | `:8000/metrics` | `hookrelay_http_requests_total{method,route,status}` | Requests by route template (`route="unmatched"` for unknown paths) |
+| | | `hookrelay_http_request_duration_seconds{method,route}` | Request latency |
+| | | `hookrelay_queue_depth{queue="delivery"\|"delayed"}` | Events waiting in Redis |
+| | | `hookrelay_events{status}` | Events per status; `status="failed"` is the DLQ size |
+| Worker | `:9100/metrics` | `hookrelay_deliveries_total{outcome="delivered"\|"retry"\|"failed"}` | Delivery outcomes |
+| | | `hookrelay_delivery_duration_seconds` | Time of the POST to the receiver |
+| | | `hookrelay_reaper_recovered_total{kind}` | `orphaned`, `stuck_rescheduled`, `stuck_failed` |
+| | | `hookrelay_reaper_errors_total{pass_name}` | Reaper passes that raised |
+| | | `hookrelay_worker_loop_errors_total` | Main-loop iterations retried after an outage |
+
+Queue depth and events by status are read from Redis and PostgreSQL at scrape time, so they always match the source of truth.
+
+Example Prometheus scrape configuration on the Compose network:
+
+```yaml
+scrape_configs:
+  - job_name: hookrelay-api
+    static_configs: [{targets: ["api:8000"]}]
+  - job_name: hookrelay-worker
+    static_configs: [{targets: ["worker:9100"]}]
+```
+
+Useful queries:
+
+```promql
+# Delivery success ratio over 5 minutes
+sum(rate(hookrelay_deliveries_total{outcome="delivered"}[5m]))
+  / sum(rate(hookrelay_deliveries_total[5m]))
+
+# p95 latency of receivers
+histogram_quantile(0.95, sum by (le) (rate(hookrelay_delivery_duration_seconds_bucket[5m])))
+
+# Dead-letter queue size (alert when > 0)
+hookrelay_events{status="failed"}
+```
+
+### Health probes
+
+| Endpoint | Type | Checks | Use it for |
+|---|---|---|---|
+| `GET /health` | Liveness | Nothing; the process answers | Restarting a hung container (the Compose healthcheck) |
+| `GET /health/ready` | Readiness | `SELECT 1` on PostgreSQL and `PING` on Redis, 2s timeout each | Routing traffic; returns `503` naming the failing check |
+
+```bash
+$ curl -s localhost:8000/health/ready
+{"status":"unavailable","checks":{"postgres":"ok","redis":"error: TimeoutError"}}
+```
+
+Failed checks report only the exception type; connection details stay in the logs.
+
 ## Signed deliveries
 
 Every delivery POST includes these headers:
@@ -225,6 +305,12 @@ The following implementation decisions are useful to understand when reviewing t
 - **Non-root container.** The `appuser` account maps to the host UID/GID through build arguments, allowing bind mounts and Alembic revision generation without `sudo`.
 
 - **One image, two entrypoints.** The API and worker share the same Docker image. The Compose service command determines which process runs.
+
+- **Liveness and readiness are separate.** `/health` never touches PostgreSQL or Redis, so a database outage does not get the API restarted in a loop. `/health/ready` is what decides whether traffic should reach it.
+
+- **State gauges are computed at scrape time.** Queue depth and events by status come from `LLEN`/`ZCARD` and a `GROUP BY status` query on each scrape instead of in-memory counters, which would reset on restart and drift between processes.
+
+- **The worker survives outages.** A Redis or PostgreSQL error in the main loop is logged and retried with backoff (1s up to 30s) instead of ending the process, and Compose restarts `api` and `worker` if they ever exit. An event interrupted mid-flight is recovered by the reaper.
 
 ## Development
 
@@ -299,6 +385,15 @@ docker compose logs worker | grep "stuck in_progress"
 ```
 
 Expect `Released N stuck in_progress event(s): X rescheduled, Y failed`.
+
+### Worker logs `Worker loop failed; retrying in Ns`
+
+Redis or PostgreSQL is unreachable. The worker keeps retrying with backoff (up to 30s) and logs `Worker loop recovered after N failure(s)` once the dependency is back. Check the dependencies:
+
+```bash
+curl -s localhost:8000/health/ready
+docker compose ps
+```
 
 ### Two workers are processing the queue
 
