@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api import ops
+from app.api.metrics import PrometheusMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -22,9 +24,6 @@ app = FastAPI(
     version="0.2.1",
     lifespan=lifespan,
 )
+app.add_middleware(PrometheusMiddleware)
+app.include_router(ops.router)
 app.include_router(api_router, prefix="/api/v1")
-
-
-@app.get("/health", tags=["ops"])
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
