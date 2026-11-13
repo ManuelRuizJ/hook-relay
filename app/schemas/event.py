@@ -51,3 +51,9 @@ class EventStatusRead(BaseModel):
     delivered_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+class DeadLetterRead(EventStatusRead):
+    """A dead-lettered event: delivery progress plus what it was and where it went."""
+
+    endpoint_id: UUID
+    event_type: str

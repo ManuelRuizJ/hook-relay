@@ -6,7 +6,7 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
 ## Status
 
-🚧 Under construction — Phase 4 of 6 complete.
+🚧 Under construction — Phase 5 of 6 complete.
 
 ## Roadmap
 
@@ -17,7 +17,8 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 - [x] Webhook endpoint CRUD
 - [x] Event ingestion
 - [x] Delivery worker with retries
-- [ ] Dead-letter queue
+- [x] Reliability: orphan and stuck-claim recovery
+- [x] Dead-letter queue
 - [ ] Observability
 - [ ] CI
 
@@ -98,6 +99,20 @@ docker compose -f docker-compose.yml up --build -d
 | `POST` | `/api/v1/endpoints/{id}/events` | Ingest an event. Returns `201` with `status: "pending"`. |
 | `GET` | `/api/v1/events/{id}` | Get event status, attempts, `next_attempt_at`, `last_error` and `delivered_at`. |
 
+### Dead-letter queue
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/dead-letters` | List `failed` events, most recently failed first. Filters: `endpoint_id`, `skip`, `limit`. |
+| `POST` | `/api/v1/events/{id}/replay` | `failed` or `dead` → `pending` with `attempts` reset to 0, then re-enqueued. `409` for any other status or an inactive endpoint. |
+| `POST` | `/api/v1/events/{id}/discard` | `failed` → `dead`: archived for audit and hidden from the listing. Can still be replayed. |
+
+```bash
+# Inspect the dead-letter queue, then replay one event after fixing the receiver
+curl -s http://localhost:8000/api/v1/dead-letters
+curl -s -X POST "http://localhost:8000/api/v1/events/$EVENT_ID/replay"
+```
+
 ## Quick start
 
 Create an endpoint, save its returned ID and signing secret, and then submit an event:
@@ -132,7 +147,10 @@ pending ──claim──▶ in_progress ──success──▶ delivered
    │                    │                                                │
    └────────────────────┴────────────────────────────────────────────────┘
 
-                       ├──failure, attempts = max──▶ failed (Phase 5: DLQ)
+                       ├──failure, attempts = max──▶ failed (dead-letter queue)
+                       │                                  │
+                       │                                  ├──replay──▶ pending (attempts = 0)
+                       │                                  └──discard──▶ dead ──replay──▶ pending
                        │
                        └──claim older than 120s (worker lost)──▶ same rule as a failure
 ```
@@ -144,6 +162,8 @@ pending ──claim──▶ in_progress ──success──▶ delivered
 **Orphan recovery:** a `pending` event whose `next_attempt_at` is more than 30s in the past has no path back to the queue (the worker died before claiming it, or `LPUSH` failed after the commit). The orphan reaper runs every 30s inside the worker, pushes `next_attempt_at` forward another 30s and re-enqueues the event. `in_progress` events are not touched by this pass.
 
 **Stuck claim recovery:** an event that stays `in_progress` for more than 120s was claimed by a worker that died mid-delivery (a live delivery is bounded by the HTTP timeout, about 25s). The same reaper task releases it with the rule used for a failed delivery: the lost attempt is not refunded, so the event goes back to `pending` with backoff on `webhooks:delayed`, or to `failed` when `max_attempts` is spent. `last_error` is set to `worker lost claim: in_progress timeout`.
+
+**Dead-letter queue:** an event whose retries are exhausted stays in PostgreSQL as `failed`, with its `last_error`. An operator either replays it, which gives it a fresh `max_attempts` budget, or discards it to `dead`, which keeps it for audit without listing it. Replay is rejected while the endpoint is inactive, since it would fail again.
 
 **Retry backoff:** 2s → 4s → 8s → 16s, capped at 5 minutes, with 0–10% jitter to reduce thundering-herd effects.
 
@@ -193,6 +213,8 @@ The following implementation decisions are useful to understand when reviewing t
 - **Orphan reaper as a sibling task.** A second asyncio task in the worker process scans PostgreSQL every 30s for stale `pending` events (batches of 100, oldest first) using `SELECT ... FOR UPDATE SKIP LOCKED`, so several reapers never double-enqueue. It advances `next_attempt_at` before `LPUSH` to avoid re-picking the same event on the next cycle. A failed cycle is logged and retried; it never stops the worker, and the task is cancelled cleanly on shutdown.
 
 - **Claim timeout from `updated_at`, no extra column.** `mark_in_progress` is the last write to an `in_progress` row, so `updated_at` already records the claim time. The 120s timeout is roughly five times the worst-case HTTP timeout, so a slow but live worker is not preempted. If one ever were, the event could be delivered twice, which at-least-once delivery already allows.
+
+- **PostgreSQL is the dead-letter queue.** `failed` already means "retries exhausted", so the DLQ is a query, not a second store. A Redis list would duplicate that state and could drift from it. Replay and discard lock the row (`SELECT ... FOR UPDATE`), so a double-clicked replay enqueues the event once and the second request gets `409`. Replay follows the ingestion contract: commit, then best-effort `LPUSH`, with the orphan reaper as the fallback.
 
 - **Flat `/events/{id}` route.** Event IDs are UUIDs, so the parent endpoint is not required to retrieve an event.
 
