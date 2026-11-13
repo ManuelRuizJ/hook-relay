@@ -20,12 +20,16 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.services.event_service import EventService
 from app.worker.delivery import HTTP_TIMEOUT, deliver_event
-from app.worker.metrics import DELIVERIES
+from app.worker.metrics import DELIVERIES, WORKER_LOOP_ERRORS
 from app.worker.reaper import reaper_loop
 
 logger = logging.getLogger(__name__)
 
 BRPOP_TIMEOUT_SECONDS = 5
+
+# Backoff after a failed loop iteration: 1s, 2s, 4s... capped at 30s.
+LOOP_BACKOFF_BASE_SECONDS = 1.0
+LOOP_BACKOFF_MAX_SECONDS = 30.0
 
 
 async def _fetch_event_and_endpoint(
@@ -134,6 +138,24 @@ async def reap_delayed(redis) -> int:
     return moved
 
 
+async def _poll_once(client: httpx.AsyncClient, redis) -> None:
+    """One loop iteration: promote due retries, then handle one queued event."""
+    await reap_delayed(redis)
+    result = await redis.brpop([WEBHOOK_DELIVERY_QUEUE], timeout=BRPOP_TIMEOUT_SECONDS)
+    if result is None:
+        return
+    _queue, event_id = result
+    await _handle_event(client, event_id)
+
+
+async def _sleep_unless_shutdown(shutdown: asyncio.Event, seconds: float) -> None:
+    """Sleep, but wake up immediately on SIGINT/SIGTERM."""
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=seconds)
+    except TimeoutError:
+        pass
+
+
 async def run_worker(shutdown: asyncio.Event) -> None:
     redis = get_redis_client()
     logger.info("Worker started; waiting on %s", WEBHOOK_DELIVERY_QUEUE)
@@ -145,15 +167,34 @@ async def run_worker(shutdown: asyncio.Event) -> None:
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         try:
+            failures = 0
             while not shutdown.is_set():
-                await reap_delayed(redis)
-                result = await redis.brpop(
-                    [WEBHOOK_DELIVERY_QUEUE], timeout=BRPOP_TIMEOUT_SECONDS
-                )
-                if result is None:
-                    continue
-                _queue, event_id = result
-                await _handle_event(client, event_id)
+                try:
+                    await _poll_once(client, redis)
+                except Exception:
+                    # A Redis or Postgres outage must not kill the process.
+                    # An event interrupted mid-flight is recovered by the
+                    # reaper (orphaned pending or stuck in_progress).
+                    failures += 1
+                    delay = min(
+                        LOOP_BACKOFF_BASE_SECONDS * 2 ** (failures - 1),
+                        LOOP_BACKOFF_MAX_SECONDS,
+                    )
+                    WORKER_LOOP_ERRORS.inc()
+                    logger.exception(
+                        "Worker loop failed; retrying in %.0fs",
+                        delay,
+                        extra={"consecutive_failures": failures, "retry_in_s": delay},
+                    )
+                    await _sleep_unless_shutdown(shutdown, delay)
+                else:
+                    if failures:
+                        logger.info(
+                            "Worker loop recovered after %d failure(s)",
+                            failures,
+                            extra={"consecutive_failures": failures},
+                        )
+                    failures = 0
         finally:
             logger.info("Worker shutting down")
             reaper_task.cancel()

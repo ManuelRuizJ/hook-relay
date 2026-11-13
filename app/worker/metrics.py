@@ -28,6 +28,11 @@ REAPER_RECOVERED = Counter(
     "Events recovered by the reaper, by kind.",
     ["kind"],
 )
+WORKER_LOOP_ERRORS = Counter(
+    "hookrelay_worker_loop_errors_total",
+    "Main-loop iterations that raised (e.g. Redis or Postgres unreachable) "
+    "and were retried with backoff.",
+)
 REAPER_ERRORS = Counter(
     "hookrelay_reaper_errors_total",
     "Reaper passes that raised and will be retried next cycle.",

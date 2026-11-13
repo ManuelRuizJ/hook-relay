@@ -130,3 +130,49 @@ async def test_handle_event_schedules_retry_when_budget_remains(
     assert await redis_client.llen(WEBHOOK_DELIVERY_QUEUE) == 0
     members = await redis_client.zrange(WEBHOOK_DELAYED_QUEUE, 0, -1)
     assert members == [str(event_id)]
+
+
+async def test_run_worker_survives_redis_outage(monkeypatch):
+    """A Redis error in the main loop is retried, not fatal (regression).
+
+    Before the fix, ConnectionError from BRPOP propagated out of run_worker
+    and the process exited, stopping all deliveries until a manual restart.
+    """
+    import asyncio
+
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    import app.worker.main as worker_main
+    from app.worker.metrics import WORKER_LOOP_ERRORS
+
+    shutdown = asyncio.Event()
+    calls = 0
+
+    class _FlakyRedis:
+        async def zrangebyscore(self, *args, **kwargs):
+            return []
+
+        async def brpop(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RedisConnectionError("Connection closed by server.")
+            shutdown.set()  # second iteration succeeds; stop the loop
+            return None
+
+    async def _idle_reaper(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    async def _noop_close():
+        pass
+
+    monkeypatch.setattr(worker_main, "get_redis_client", lambda: _FlakyRedis())
+    monkeypatch.setattr(worker_main, "close_redis_client", _noop_close)
+    monkeypatch.setattr(worker_main, "reaper_loop", _idle_reaper)
+    monkeypatch.setattr(worker_main, "LOOP_BACKOFF_BASE_SECONDS", 0.01)
+
+    errors_before = WORKER_LOOP_ERRORS._value.get()
+    await asyncio.wait_for(worker_main.run_worker(shutdown), timeout=5)
+
+    assert calls == 2
+    assert WORKER_LOOP_ERRORS._value.get() == errors_before + 1
