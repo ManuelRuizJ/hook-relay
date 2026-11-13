@@ -66,7 +66,9 @@ class EventService:
             await self.redis.lpush(WEBHOOK_DELIVERY_QUEUE, str(event.id))
         except RedisError:
             logger.exception(
-                "Failed to enqueue event %s; reaper will recover", event.id
+                "Failed to enqueue event %s; reaper will recover",
+                event.id,
+                extra={"event_id": str(event.id)},
             )
 
         return event
@@ -118,8 +120,13 @@ class EventService:
             logger.exception(
                 "Failed to enqueue replayed event %s; reaper will recover",
                 updated.id,
+                extra={"event_id": str(updated.id)},
             )
-        logger.info("Event %s replayed from the dead-letter queue", updated.id)
+        logger.info(
+            "Event %s replayed from the dead-letter queue",
+            updated.id,
+            extra={"event_id": str(updated.id)},
+        )
         return updated
 
     async def discard(self, event_id: UUID) -> Event:
@@ -135,7 +142,11 @@ class EventService:
         event.status = EventStatus.DEAD
         updated = await self.event_repo.update(event)
         await self.session.commit()
-        logger.info("Event %s discarded from the dead-letter queue", updated.id)
+        logger.info(
+            "Event %s discarded from the dead-letter queue",
+            updated.id,
+            extra={"event_id": str(updated.id)},
+        )
         return updated
 
     async def get(self, event_id: UUID) -> Event:

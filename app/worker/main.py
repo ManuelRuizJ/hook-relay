@@ -42,15 +42,24 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
     try:
         parsed_id = UUID(event_id)
     except ValueError:
-        logger.warning("Dropping malformed event id from queue: %r", event_id)
+        logger.warning(
+            "Dropping malformed event id from queue: %r",
+            event_id,
+            extra={"event_id": event_id},
+        )
         return
 
     async with SessionLocal() as session:
         row = await _fetch_event_and_endpoint(session, parsed_id)
         if row is None:
-            logger.warning("Event %s not found (endpoint deleted?); dropping", event_id)
+            logger.warning(
+                "Event %s not found (endpoint deleted?); dropping",
+                event_id,
+                extra={"event_id": event_id},
+            )
             return
         event, endpoint = row
+        log_ctx = {"event_id": str(event.id), "endpoint_id": str(endpoint.id)}
 
         # Claim the event before the network call so a concurrent worker
         # (Phase 5+) cannot also pick it up.
@@ -61,12 +70,18 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
             redis=get_redis_client(),
         )
         await service.mark_in_progress(event)
+        log_ctx["attempt"] = event.attempts
 
         result = await deliver_event(client, event, endpoint)
 
         if result.success:
             await service.mark_delivered(event)
-            logger.info("Event %s delivered on attempt %d", event.id, event.attempts)
+            logger.info(
+                "Event %s delivered on attempt %d",
+                event.id,
+                event.attempts,
+                extra=log_ctx,
+            )
             return
 
         await service.mark_failed(event, result.error or "unknown error")
@@ -79,12 +94,14 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
                 event.id,
                 event.attempts,
                 event.next_attempt_at.isoformat(),
+                extra={**log_ctx, "next_attempt_at": event.next_attempt_at},
             )
         else:
             logger.info(
                 "Event %s marked failed after %d attempt(s)",
                 event.id,
                 event.attempts,
+                extra={**log_ctx, "last_error": event.last_error},
             )
 
 
@@ -108,7 +125,7 @@ async def reap_delayed(redis) -> int:
             await redis.lpush(WEBHOOK_DELIVERY_QUEUE, event_id)
             moved += 1
     if moved:
-        logger.info("Re-queued %d delayed event(s)", moved)
+        logger.info("Re-queued %d delayed event(s)", moved, extra={"count": moved})
     return moved
 
 

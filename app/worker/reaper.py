@@ -77,7 +77,11 @@ async def reap_orphaned_events(
     for event in events:
         await redis.lpush(WEBHOOK_DELIVERY_QUEUE, str(event.id))
 
-    logger.info("Re-queued %d orphaned event(s)", len(events))
+    logger.info(
+        "Re-queued %d orphaned event(s)",
+        len(events),
+        extra={"count": len(events)},
+    )
     return len(events)
 
 
@@ -146,6 +150,11 @@ async def reap_stuck_in_progress(
         len(events),
         len(to_retry),
         len(events) - len(to_retry),
+        extra={
+            "count": len(events),
+            "rescheduled": len(to_retry),
+            "failed": len(events) - len(to_retry),
+        },
     )
     return len(events)
 

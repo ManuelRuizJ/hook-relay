@@ -24,6 +24,10 @@ class DeliveryResult:
     error: str | None
 
 
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 1)
+
+
 def sign_payload(secret: str, timestamp: int, body: bytes) -> str:
     """HMAC-SHA256 over '{timestamp}.{body}'.
 
@@ -62,23 +66,31 @@ async def deliver_event(
         "X-HookRelay-Signature": f"sha256={signature}",
     }
 
+    log_ctx = {"event_id": str(event.id), "url": endpoint.url}
+    started = time.perf_counter()
     try:
         resp = await client.post(endpoint.url, content=body, headers=headers)
     except httpx.HTTPError as exc:
-        logger.warning("Delivery failed for event %s: %s", event.id, exc)
+        log_ctx["duration_ms"] = _elapsed_ms(started)
+        logger.warning("Delivery failed for event %s: %s", event.id, exc, extra=log_ctx)
         return DeliveryResult(success=False, status_code=None, error=str(exc))
 
+    log_ctx.update(status_code=resp.status_code, duration_ms=_elapsed_ms(started))
     if 200 <= resp.status_code < 300:
         logger.info(
             "Delivered event %s to %s (HTTP %s)",
             event.id,
             endpoint.url,
             resp.status_code,
+            extra=log_ctx,
         )
         return DeliveryResult(success=True, status_code=resp.status_code, error=None)
 
     logger.warning(
-        "Delivery rejected for event %s: HTTP %s", event.id, resp.status_code
+        "Delivery rejected for event %s: HTTP %s",
+        event.id,
+        resp.status_code,
+        extra=log_ctx,
     )
     return DeliveryResult(
         success=False,
