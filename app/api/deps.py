@@ -14,8 +14,10 @@ from app.services.webhook_endpoint_service import WebhookEndpointService
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 RedisDep = Annotated[Redis, Depends(get_redis_client)]
 
+
 def get_webhook_endpoint_service(session: DbSession) -> WebhookEndpointService:
     return WebhookEndpointService(WebhookEndpointRepository(session))
+
 
 def get_event_service(session: DbSession, redis: RedisDep) -> EventService:
     return EventService(
@@ -29,7 +31,6 @@ def get_event_service(session: DbSession, redis: RedisDep) -> EventService:
 WebhookEndpointServiceDep = Annotated[
     WebhookEndpointService, Depends(get_webhook_endpoint_service)
 ]
-
 
 
 EventServiceDep = Annotated[EventService, Depends(get_event_service)]

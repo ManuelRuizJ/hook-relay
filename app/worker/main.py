@@ -46,9 +46,7 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
     async with SessionLocal() as session:
         row = await _fetch_event_and_endpoint(session, parsed_id)
         if row is None:
-            logger.warning(
-                "Event %s not found (endpoint deleted?); dropping", event_id
-            )
+            logger.warning("Event %s not found (endpoint deleted?); dropping", event_id)
             return
         event, endpoint = row
 
@@ -66,18 +64,14 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
 
         if result.success:
             await service.mark_delivered(event)
-            logger.info(
-                "Event %s delivered on attempt %d", event.id, event.attempts
-            )
+            logger.info("Event %s delivered on attempt %d", event.id, event.attempts)
             return
 
         await service.mark_failed(event, result.error or "unknown error")
 
         if event.status == EventStatus.PENDING:
             score = event.next_attempt_at.timestamp()
-            await get_redis_client().zadd(
-                WEBHOOK_DELAYED_QUEUE, {str(event.id): score}
-            )
+            await get_redis_client().zadd(WEBHOOK_DELAYED_QUEUE, {str(event.id): score})
             logger.info(
                 "Event %s scheduled for retry after attempt %d (next at %s)",
                 event.id,
@@ -90,6 +84,7 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
                 event.id,
                 event.attempts,
             )
+
 
 REAP_BATCH_SIZE = 100
 

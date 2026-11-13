@@ -23,8 +23,9 @@ class EventStatus(str, enum.Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     DELIVERED = "delivered"
-    FAILED = "failed"          # all retries exhausted → DLQ
-    DEAD = "dead"              # parked in DLQ after manual inspection
+    FAILED = "failed"  # all retries exhausted → DLQ
+    DEAD = "dead"  # parked in DLQ after manual inspection
+
 
 class Event(Base):
     __tablename__ = "events"

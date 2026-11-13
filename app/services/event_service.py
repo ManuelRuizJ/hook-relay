@@ -40,9 +40,7 @@ class EventService:
         self.endpoint_repo = endpoint_repo
         self.redis = redis
 
-    async def create_and_enqueue(
-        self, endpoint_id: UUID, data: EventCreate
-    ) -> Event:
+    async def create_and_enqueue(self, endpoint_id: UUID, data: EventCreate) -> Event:
         endpoint = await self.endpoint_repo.get_by_id(endpoint_id)
         if endpoint is None:
             raise WebhookNotFound(endpoint_id)

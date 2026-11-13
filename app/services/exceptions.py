@@ -20,6 +20,7 @@ class EventNotFound(Exception):
         self.event_id = event_id
         super().__init__(f"Event {event_id} not found")
 
+
 class InvalidEventTransition(Exception):
     """The requested operation is not allowed from the event's current status."""
 

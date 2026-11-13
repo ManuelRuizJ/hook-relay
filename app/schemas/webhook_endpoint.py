@@ -28,4 +28,5 @@ class WebhookEndpointRead(BaseModel):
 
 class WebhookEndpointWithSecret(WebhookEndpointRead):
     """Returned only on creation — the caller needs to store the secret."""
+
     secret: str

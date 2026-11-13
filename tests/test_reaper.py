@@ -29,9 +29,7 @@ async def _seed_pending_event(
     next_attempt_at: datetime,
     status: EventStatus = EventStatus.PENDING,
 ):
-    endpoint = WebhookEndpoint(
-        url="http://receiver.example/hooks", secret="x"
-    )
+    endpoint = WebhookEndpoint(url="http://receiver.example/hooks", secret="x")
     session.add(endpoint)
     await session.flush()
     event = Event(
@@ -104,9 +102,7 @@ async def _seed_in_progress_event(
     max_attempts: int = 5,
 ):
     """Seed an in_progress event whose claim (updated_at) is `claimed_ago` old."""
-    endpoint = WebhookEndpoint(
-        url="http://receiver.example/hooks", secret="x"
-    )
+    endpoint = WebhookEndpoint(url="http://receiver.example/hooks", secret="x")
     session.add(endpoint)
     await session.flush()
     event = Event(
@@ -123,9 +119,7 @@ async def _seed_in_progress_event(
     return event
 
 
-async def test_stuck_in_progress_is_rescheduled_with_backoff(
-    db_engine, redis_client
-):
+async def test_stuck_in_progress_is_rescheduled_with_backoff(db_engine, redis_client):
     Session = async_sessionmaker(db_engine, expire_on_commit=False)
     async with Session() as session:
         event = await _seed_in_progress_event(
@@ -150,9 +144,7 @@ async def test_stuck_in_progress_is_rescheduled_with_backoff(
     assert await redis_client.llen(WEBHOOK_DELIVERY_QUEUE) == 0
 
 
-async def test_stuck_in_progress_with_no_budget_left_fails(
-    db_engine, redis_client
-):
+async def test_stuck_in_progress_with_no_budget_left_fails(db_engine, redis_client):
     Session = async_sessionmaker(db_engine, expire_on_commit=False)
     async with Session() as session:
         event = await _seed_in_progress_event(

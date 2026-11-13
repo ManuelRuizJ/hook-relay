@@ -9,9 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 # LPUSH and LRANGE, causing flaky failures. Using a dedicated DB index
 # removes the race without requiring "stop the worker before pytest".
 # Override with TEST_REDIS_URL in CI if needed.
-os.environ["REDIS_URL"] = os.environ.get(
-    "TEST_REDIS_URL", "redis://redis:6379/15"
-)
+os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://redis:6379/15")
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -19,10 +17,8 @@ from app.core.redis import close_redis_client, get_redis_client
 from app.main import app
 from app.models import Base
 
-TEST_DB_URL = (
-    settings.database_url.rsplit("/", 1)[0]
-    + f"/{settings.postgres_db}_test"
-)
+TEST_DB_URL = settings.database_url.rsplit("/", 1)[0] + f"/{settings.postgres_db}_test"
+
 
 @pytest_asyncio.fixture(scope="function")
 async def db_engine():

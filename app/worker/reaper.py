@@ -46,9 +46,7 @@ async def reap_orphaned_events(
     reaper cycle does not re-pick it, then LPUSH. If the worker still
     does not pick it up, the next cycle will catch it again.
     """
-    cutoff = datetime.now(UTC) - timedelta(
-        seconds=stale_threshold_seconds
-    )
+    cutoff = datetime.now(UTC) - timedelta(seconds=stale_threshold_seconds)
     now = datetime.now(UTC)
 
     async with session_factory() as session:
