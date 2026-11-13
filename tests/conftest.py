@@ -68,16 +68,19 @@ async def redis_client():
 
 @pytest_asyncio.fixture(scope="function")
 async def failing_redis():
-    """Override get_redis_client with a fake whose lpush always fails.
+    """Override get_redis_client with a fake whose every call fails.
 
-    Used to prove that event ingestion survives a Redis outage: the API
-    still returns 201 and the event stays ``pending`` in Postgres.
+    Used to prove that event ingestion survives a Redis outage (the API
+    still returns 201 and the event stays ``pending`` in Postgres), and
+    that readiness and metrics degrade instead of erroring.
     """
     from redis.exceptions import RedisError
 
     class _FailingRedis:
-        async def lpush(self, *args, **kwargs):
+        async def _fail(self, *args, **kwargs):
             raise RedisError("simulated redis failure")
+
+        lpush = ping = llen = zcard = _fail
 
         async def aclose(self):
             pass
