@@ -3,11 +3,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
+from app.core.config import settings
+from app.core.logging import configure_logging
 from app.core.redis import close_redis_client
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Runs after uvicorn has set up its own logging, so this takes precedence.
+    configure_logging(settings.log_level, settings.log_format)
     yield
     await close_redis_client()
 

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,7 @@ class Settings(BaseSettings):
     redis_url: str
     api_port: int = 8000
     log_level: str = "INFO"
+    log_format: Literal["json", "text"] = "json"
 
     @property
     def database_url(self) -> str:

@@ -8,7 +8,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.logging import configure_logging
 from app.core.queue import WEBHOOK_DELAYED_QUEUE, WEBHOOK_DELIVERY_QUEUE
 from app.core.redis import close_redis_client, get_redis_client
 from app.models.event import Event, EventStatus
@@ -141,10 +143,7 @@ async def run_worker(shutdown: asyncio.Event) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging(settings.log_level, settings.log_format)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
