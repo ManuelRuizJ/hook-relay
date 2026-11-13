@@ -5,6 +5,7 @@ import time
 from uuid import UUID
 
 import httpx
+from prometheus_client import start_http_server
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,7 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.services.event_service import EventService
 from app.worker.delivery import HTTP_TIMEOUT, deliver_event
+from app.worker.metrics import DELIVERIES
 from app.worker.reaper import reaper_loop
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,7 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
 
         if result.success:
             await service.mark_delivered(event)
+            DELIVERIES.labels("delivered").inc()
             logger.info(
                 "Event %s delivered on attempt %d",
                 event.id,
@@ -87,6 +90,7 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
         await service.mark_failed(event, result.error or "unknown error")
 
         if event.status == EventStatus.PENDING:
+            DELIVERIES.labels("retry").inc()
             score = event.next_attempt_at.timestamp()
             await get_redis_client().zadd(WEBHOOK_DELAYED_QUEUE, {str(event.id): score})
             logger.info(
@@ -97,6 +101,7 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
                 extra={**log_ctx, "next_attempt_at": event.next_attempt_at},
             )
         else:
+            DELIVERIES.labels("failed").inc()
             logger.info(
                 "Event %s marked failed after %d attempt(s)",
                 event.id,
@@ -161,6 +166,14 @@ async def run_worker(shutdown: asyncio.Event) -> None:
 
 def main() -> None:
     configure_logging(settings.log_level, settings.log_format)
+    # Background thread serving this process's metrics; the API cannot see
+    # the worker's counters, so Prometheus scrapes both.
+    start_http_server(settings.worker_metrics_port)
+    logger.info(
+        "Worker metrics on :%d/metrics",
+        settings.worker_metrics_port,
+        extra={"port": settings.worker_metrics_port},
+    )
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

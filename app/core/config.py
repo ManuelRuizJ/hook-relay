@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
+    worker_metrics_port: int = 9100
 
     @property
     def database_url(self) -> str:
