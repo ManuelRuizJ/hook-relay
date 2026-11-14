@@ -1,9 +1,13 @@
+import hashlib
+import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.queue import WEBHOOK_DELIVERY_QUEUE
@@ -13,6 +17,7 @@ from app.repositories.webhook_endpoint_repository import WebhookEndpointReposito
 from app.schemas.event import EventCreate
 from app.services.exceptions import (
     EventNotFound,
+    IdempotencyKeyReused,
     InvalidEventTransition,
     WebhookEndpointInactive,
     WebhookNotFound,
@@ -25,6 +30,29 @@ logger = logging.getLogger(__name__)
 # exhausted stays in Postgres with status `failed`. `dead` means an operator
 # inspected it and chose to archive it instead of replaying.
 REPLAYABLE_STATUSES = frozenset({EventStatus.FAILED, EventStatus.DEAD})
+
+
+@dataclass(frozen=True)
+class IngestResult:
+    event: Event
+    # True when an Idempotency-Key matched an earlier request and the
+    # original event is returned instead of creating a new one.
+    replayed: bool
+
+
+def request_fingerprint(data: EventCreate) -> str:
+    """SHA-256 of the request body in canonical form (sorted keys, no spaces).
+
+    Two bodies that differ only in key order or whitespace are the same
+    request; any change to event_type or payload is a different one.
+    """
+    canonical = json.dumps(
+        {"event_type": data.event_type, "payload": data.payload},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 class EventService:
@@ -40,24 +68,61 @@ class EventService:
         self.endpoint_repo = endpoint_repo
         self.redis = redis
 
-    async def create_and_enqueue(self, endpoint_id: UUID, data: EventCreate) -> Event:
+    async def create_and_enqueue(
+        self,
+        endpoint_id: UUID,
+        data: EventCreate,
+        *,
+        idempotency_key: str | None = None,
+    ) -> IngestResult:
+        """Persist and enqueue an event, at most once per Idempotency-Key.
+
+        With a key, a retried request (same key, same body) gets the
+        original event back and nothing new is created or enqueued. The
+        replay check runs before the is_active check, so a client retrying
+        a request that already succeeded gets the same answer even if the
+        endpoint was deactivated in between.
+        """
         endpoint = await self.endpoint_repo.get_by_id(endpoint_id)
         if endpoint is None:
             raise WebhookNotFound(endpoint_id)
+
+        fingerprint = request_fingerprint(data) if idempotency_key else None
+        if idempotency_key:
+            existing = await self.event_repo.get_by_idempotency_key(
+                endpoint_id, idempotency_key
+            )
+            if existing is not None:
+                return self._replay(existing, idempotency_key, fingerprint)
+
         if not endpoint.is_active:
             raise WebhookEndpointInactive(endpoint_id)
 
         event = Event(
-            endpoint_id=endpoint.id,
+            endpoint_id=endpoint_id,
             event_type=data.event_type,
             payload=data.payload,
             status=EventStatus.PENDING,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
         )
-        event = await self.event_repo.create(event)
-
-        # DB is the source of truth: commit before touching the queue so a
-        # Redis failure cannot create an event that nobody knows about.
-        await self.session.commit()
+        try:
+            event = await self.event_repo.create(event)
+            # DB is the source of truth: commit before touching the queue so
+            # a Redis failure cannot create an event that nobody knows about.
+            await self.session.commit()
+        except IntegrityError:
+            # Two requests with the same key raced past the lookup above;
+            # the unique constraint let exactly one insert win. Return it.
+            if idempotency_key is None:
+                raise
+            await self.session.rollback()
+            existing = await self.event_repo.get_by_idempotency_key(
+                endpoint_id, idempotency_key
+            )
+            if existing is None:
+                raise
+            return self._replay(existing, idempotency_key, fingerprint)
 
         # Best-effort enqueue. If this fails, the event stays pending in the
         # DB and the Phase 5 reaper will re-enqueue it. Callers still get 201
@@ -71,7 +136,23 @@ class EventService:
                 extra={"event_id": str(event.id)},
             )
 
-        return event
+        return IngestResult(event=event, replayed=False)
+
+    def _replay(
+        self, existing: Event, idempotency_key: str, fingerprint: str | None
+    ) -> IngestResult:
+        if existing.request_fingerprint != fingerprint:
+            raise IdempotencyKeyReused(existing.endpoint_id, idempotency_key)
+        logger.info(
+            "Idempotent replay of event %s",
+            existing.id,
+            extra={
+                "event_id": str(existing.id),
+                "endpoint_id": str(existing.endpoint_id),
+                "idempotency_key": idempotency_key,
+            },
+        )
+        return IngestResult(event=existing, replayed=True)
 
     async def list_dead_letters(
         self,
