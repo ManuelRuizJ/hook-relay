@@ -8,6 +8,7 @@ would miss.
 """
 
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -17,6 +18,7 @@ from app.models.webhook_endpoint import WebhookEndpoint
 from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.worker.main import _handle_event
+from tests.metrics_helpers import sample
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -130,3 +132,73 @@ async def test_handle_event_schedules_retry_when_budget_remains(
     assert await redis_client.llen(WEBHOOK_DELIVERY_QUEUE) == 0
     members = await redis_client.zrange(WEBHOOK_DELAYED_QUEUE, 0, -1)
     assert members == [str(event_id)]
+
+
+async def test_run_worker_survives_redis_outage(monkeypatch):
+    """A Redis error in the main loop is retried, not fatal (regression).
+
+    Before the fix, ConnectionError from BRPOP propagated out of run_worker
+    and the process exited, stopping all deliveries until a manual restart.
+    """
+    import asyncio
+
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    import app.worker.main as worker_main
+
+    shutdown = asyncio.Event()
+    calls = 0
+
+    class _FlakyRedis:
+        async def zrangebyscore(self, *args, **kwargs):
+            return []
+
+        async def brpop(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RedisConnectionError("Connection closed by server.")
+            shutdown.set()  # second iteration succeeds; stop the loop
+            return None
+
+    async def _idle_reaper(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    async def _noop_close():
+        pass
+
+    monkeypatch.setattr(worker_main, "get_redis_client", lambda: _FlakyRedis())
+    monkeypatch.setattr(worker_main, "close_redis_client", _noop_close)
+    monkeypatch.setattr(worker_main, "reaper_loop", _idle_reaper)
+    monkeypatch.setattr(worker_main, "LOOP_BACKOFF_BASE_SECONDS", 0.01)
+
+    errors_before = sample("hookrelay_worker_loop_errors_total")
+    await asyncio.wait_for(worker_main.run_worker(shutdown), timeout=5)
+
+    assert calls == 2
+    assert sample("hookrelay_worker_loop_errors_total") == errors_before + 1
+
+
+@pytest.mark.parametrize(
+    ("status_code", "max_attempts", "outcome"),
+    [(200, 5, "delivered"), (500, 3, "retry"), (500, 1, "failed")],
+)
+async def test_handle_event_counts_delivery_outcome(
+    db_engine, redis_client, status_code, max_attempts, outcome
+):
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with Session() as session:
+        event = await _seed_event(
+            session, max_attempts=max_attempts, url="http://receiver.example/hooks"
+        )
+        event_id = event.id
+
+    counted_before = sample("hookrelay_deliveries_total", outcome=outcome)
+    timed_before = sample("hookrelay_delivery_duration_seconds_count")
+
+    transport = httpx.MockTransport(lambda req: httpx.Response(status_code))
+    async with httpx.AsyncClient(transport=transport) as client:
+        await _handle_event(client, str(event_id))
+
+    assert sample("hookrelay_deliveries_total", outcome=outcome) == counted_before + 1
+    assert sample("hookrelay_delivery_duration_seconds_count") == timed_before + 1

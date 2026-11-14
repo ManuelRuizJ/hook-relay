@@ -17,6 +17,8 @@ services:
       - --reload
 
   worker:
+    ports:
+      - "9100:9100"
     volumes:
       - ./app:/app/app
       - ./alembic:/app/alembic

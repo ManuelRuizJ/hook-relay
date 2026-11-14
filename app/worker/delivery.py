@@ -9,6 +9,7 @@ import httpx
 
 from app.models.event import Event
 from app.models.webhook_endpoint import WebhookEndpoint
+from app.worker.metrics import DELIVERY_DURATION
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,13 @@ class DeliveryResult:
     success: bool
     status_code: int | None
     error: str | None
+
+
+def _record_duration(started: float) -> float:
+    """Observe the delivery histogram and return the elapsed milliseconds."""
+    elapsed = time.perf_counter() - started
+    DELIVERY_DURATION.observe(elapsed)
+    return round(elapsed * 1000, 1)
 
 
 def sign_payload(secret: str, timestamp: int, body: bytes) -> str:
@@ -62,23 +70,31 @@ async def deliver_event(
         "X-HookRelay-Signature": f"sha256={signature}",
     }
 
+    log_ctx = {"event_id": str(event.id), "url": endpoint.url}
+    started = time.perf_counter()
     try:
         resp = await client.post(endpoint.url, content=body, headers=headers)
     except httpx.HTTPError as exc:
-        logger.warning("Delivery failed for event %s: %s", event.id, exc)
+        log_ctx["duration_ms"] = _record_duration(started)
+        logger.warning("Delivery failed for event %s: %s", event.id, exc, extra=log_ctx)
         return DeliveryResult(success=False, status_code=None, error=str(exc))
 
+    log_ctx.update(status_code=resp.status_code, duration_ms=_record_duration(started))
     if 200 <= resp.status_code < 300:
         logger.info(
             "Delivered event %s to %s (HTTP %s)",
             event.id,
             endpoint.url,
             resp.status_code,
+            extra=log_ctx,
         )
         return DeliveryResult(success=True, status_code=resp.status_code, error=None)
 
     logger.warning(
-        "Delivery rejected for event %s: HTTP %s", event.id, resp.status_code
+        "Delivery rejected for event %s: HTTP %s",
+        event.id,
+        resp.status_code,
+        extra=log_ctx,
     )
     return DeliveryResult(
         success=False,

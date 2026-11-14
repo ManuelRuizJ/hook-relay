@@ -21,6 +21,7 @@ from app.worker.reaper import (
     reap_orphaned_events,
     reap_stuck_in_progress,
 )
+from tests.metrics_helpers import sample
 
 
 async def _seed_pending_event(
@@ -54,8 +55,13 @@ async def test_reaper_requeues_stale_pending_events(db_engine, redis_client):
         )
         event_id = event.id
 
+    recovered_before = sample("hookrelay_reaper_recovered_total", kind="orphaned")
     moved = await reap_orphaned_events(Session, redis_client)
     assert moved == 1
+    assert (
+        sample("hookrelay_reaper_recovered_total", kind="orphaned")
+        == recovered_before + 1
+    )
 
     queue = await redis_client.lrange(WEBHOOK_DELIVERY_QUEUE, 0, -1)
     assert str(event_id) in queue
@@ -127,8 +133,11 @@ async def test_stuck_in_progress_is_rescheduled_with_backoff(db_engine, redis_cl
         )
         event_id = event.id
 
+    kind = "stuck_rescheduled"
+    recovered_before = sample("hookrelay_reaper_recovered_total", kind=kind)
     released = await reap_stuck_in_progress(Session, redis_client)
     assert released == 1
+    assert sample("hookrelay_reaper_recovered_total", kind=kind) == recovered_before + 1
 
     async with Session() as session:
         refreshed = await session.get(Event, event_id)

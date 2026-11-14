@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.queue import WEBHOOK_DELAYED_QUEUE, WEBHOOK_DELIVERY_QUEUE
 from app.models.event import Event, EventStatus
 from app.worker.backoff import compute_backoff
+from app.worker.metrics import REAPER_ERRORS, REAPER_RECOVERED
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,12 @@ async def reap_orphaned_events(
     for event in events:
         await redis.lpush(WEBHOOK_DELIVERY_QUEUE, str(event.id))
 
-    logger.info("Re-queued %d orphaned event(s)", len(events))
+    REAPER_RECOVERED.labels("orphaned").inc(len(events))
+    logger.info(
+        "Re-queued %d orphaned event(s)",
+        len(events),
+        extra={"count": len(events)},
+    )
     return len(events)
 
 
@@ -141,11 +147,19 @@ async def reap_stuck_in_progress(
     if to_retry:
         await redis.zadd(WEBHOOK_DELAYED_QUEUE, to_retry)
 
+    REAPER_RECOVERED.labels("stuck_rescheduled").inc(len(to_retry))
+    REAPER_RECOVERED.labels("stuck_failed").inc(len(events) - len(to_retry))
+
     logger.info(
         "Released %d stuck in_progress event(s): %d rescheduled, %d failed",
         len(events),
         len(to_retry),
         len(events) - len(to_retry),
+        extra={
+            "count": len(events),
+            "rescheduled": len(to_retry),
+            "failed": len(events) - len(to_retry),
+        },
     )
     return len(events)
 
@@ -169,6 +183,7 @@ async def reaper_loop(
             except Exception:
                 # The reaper must not kill the worker. A transient DB/Redis
                 # error is logged and retried next cycle.
+                REAPER_ERRORS.labels(reap.__name__).inc()
                 logger.exception("Reaper cycle failed in %s; will retry", reap.__name__)
         await asyncio_sleep(interval_seconds)
 

@@ -33,6 +33,7 @@ services:
       - .env
     ports:
       - "${API_PORT:-8000}:8000"
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
@@ -52,6 +53,10 @@ services:
         UID: ${HOST_UID:-1000}
         GID: ${HOST_GID:-1000}
     command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    # Prometheus scrapes the worker's own /metrics on the Compose network.
+    expose:
+      - "9100"
     env_file:
       - .env
     depends_on:

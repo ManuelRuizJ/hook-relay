@@ -5,10 +5,13 @@ import time
 from uuid import UUID
 
 import httpx
+from prometheus_client import start_http_server
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.logging import configure_logging
 from app.core.queue import WEBHOOK_DELAYED_QUEUE, WEBHOOK_DELIVERY_QUEUE
 from app.core.redis import close_redis_client, get_redis_client
 from app.models.event import Event, EventStatus
@@ -17,11 +20,16 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.services.event_service import EventService
 from app.worker.delivery import HTTP_TIMEOUT, deliver_event
+from app.worker.metrics import DELIVERIES, WORKER_LOOP_ERRORS
 from app.worker.reaper import reaper_loop
 
 logger = logging.getLogger(__name__)
 
 BRPOP_TIMEOUT_SECONDS = 5
+
+# Backoff after a failed loop iteration: 1s, 2s, 4s... capped at 30s.
+LOOP_BACKOFF_BASE_SECONDS = 1.0
+LOOP_BACKOFF_MAX_SECONDS = 30.0
 
 
 async def _fetch_event_and_endpoint(
@@ -40,15 +48,24 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
     try:
         parsed_id = UUID(event_id)
     except ValueError:
-        logger.warning("Dropping malformed event id from queue: %r", event_id)
+        logger.warning(
+            "Dropping malformed event id from queue: %r",
+            event_id,
+            extra={"event_id": event_id},
+        )
         return
 
     async with SessionLocal() as session:
         row = await _fetch_event_and_endpoint(session, parsed_id)
         if row is None:
-            logger.warning("Event %s not found (endpoint deleted?); dropping", event_id)
+            logger.warning(
+                "Event %s not found (endpoint deleted?); dropping",
+                event_id,
+                extra={"event_id": event_id},
+            )
             return
         event, endpoint = row
+        log_ctx = {"event_id": str(event.id), "endpoint_id": str(endpoint.id)}
 
         # Claim the event before the network call so a concurrent worker
         # (Phase 5+) cannot also pick it up.
@@ -59,17 +76,25 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
             redis=get_redis_client(),
         )
         await service.mark_in_progress(event)
+        log_ctx["attempt"] = event.attempts
 
         result = await deliver_event(client, event, endpoint)
 
         if result.success:
             await service.mark_delivered(event)
-            logger.info("Event %s delivered on attempt %d", event.id, event.attempts)
+            DELIVERIES.labels("delivered").inc()
+            logger.info(
+                "Event %s delivered on attempt %d",
+                event.id,
+                event.attempts,
+                extra=log_ctx,
+            )
             return
 
         await service.mark_failed(event, result.error or "unknown error")
 
         if event.status == EventStatus.PENDING:
+            DELIVERIES.labels("retry").inc()
             score = event.next_attempt_at.timestamp()
             await get_redis_client().zadd(WEBHOOK_DELAYED_QUEUE, {str(event.id): score})
             logger.info(
@@ -77,12 +102,15 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
                 event.id,
                 event.attempts,
                 event.next_attempt_at.isoformat(),
+                extra={**log_ctx, "next_attempt_at": event.next_attempt_at},
             )
         else:
+            DELIVERIES.labels("failed").inc()
             logger.info(
                 "Event %s marked failed after %d attempt(s)",
                 event.id,
                 event.attempts,
+                extra={**log_ctx, "last_error": event.last_error},
             )
 
 
@@ -106,8 +134,26 @@ async def reap_delayed(redis) -> int:
             await redis.lpush(WEBHOOK_DELIVERY_QUEUE, event_id)
             moved += 1
     if moved:
-        logger.info("Re-queued %d delayed event(s)", moved)
+        logger.info("Re-queued %d delayed event(s)", moved, extra={"count": moved})
     return moved
+
+
+async def _poll_once(client: httpx.AsyncClient, redis) -> None:
+    """One loop iteration: promote due retries, then handle one queued event."""
+    await reap_delayed(redis)
+    result = await redis.brpop([WEBHOOK_DELIVERY_QUEUE], timeout=BRPOP_TIMEOUT_SECONDS)
+    if result is None:
+        return
+    _queue, event_id = result
+    await _handle_event(client, event_id)
+
+
+async def _sleep_unless_shutdown(shutdown: asyncio.Event, seconds: float) -> None:
+    """Sleep, but wake up immediately on SIGINT/SIGTERM."""
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=seconds)
+    except TimeoutError:
+        pass
 
 
 async def run_worker(shutdown: asyncio.Event) -> None:
@@ -121,15 +167,34 @@ async def run_worker(shutdown: asyncio.Event) -> None:
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         try:
+            failures = 0
             while not shutdown.is_set():
-                await reap_delayed(redis)
-                result = await redis.brpop(
-                    [WEBHOOK_DELIVERY_QUEUE], timeout=BRPOP_TIMEOUT_SECONDS
-                )
-                if result is None:
-                    continue
-                _queue, event_id = result
-                await _handle_event(client, event_id)
+                try:
+                    await _poll_once(client, redis)
+                except Exception:
+                    # A Redis or Postgres outage must not kill the process.
+                    # An event interrupted mid-flight is recovered by the
+                    # reaper (orphaned pending or stuck in_progress).
+                    failures += 1
+                    delay = min(
+                        LOOP_BACKOFF_BASE_SECONDS * 2 ** (failures - 1),
+                        LOOP_BACKOFF_MAX_SECONDS,
+                    )
+                    WORKER_LOOP_ERRORS.inc()
+                    logger.exception(
+                        "Worker loop failed; retrying in %.0fs",
+                        delay,
+                        extra={"consecutive_failures": failures, "retry_in_s": delay},
+                    )
+                    await _sleep_unless_shutdown(shutdown, delay)
+                else:
+                    if failures:
+                        logger.info(
+                            "Worker loop recovered after %d failure(s)",
+                            failures,
+                            extra={"consecutive_failures": failures},
+                        )
+                    failures = 0
         finally:
             logger.info("Worker shutting down")
             reaper_task.cancel()
@@ -141,9 +206,14 @@ async def run_worker(shutdown: asyncio.Event) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    configure_logging(settings.log_level, settings.log_format)
+    # Background thread serving this process's metrics; the API cannot see
+    # the worker's counters, so Prometheus scrapes both.
+    start_http_server(settings.worker_metrics_port)
+    logger.info(
+        "Worker metrics on :%d/metrics",
+        settings.worker_metrics_port,
+        extra={"port": settings.worker_metrics_port},
     )
 
     loop = asyncio.new_event_loop()
