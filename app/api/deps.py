@@ -6,8 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.redis import get_redis_client
+from app.repositories.api_key_repository import ApiKeyRepository
 from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
+from app.services.api_key_service import ApiKeyService
 from app.services.event_service import EventService
 from app.services.webhook_endpoint_service import WebhookEndpointService
 
@@ -34,3 +36,10 @@ WebhookEndpointServiceDep = Annotated[
 
 
 EventServiceDep = Annotated[EventService, Depends(get_event_service)]
+
+
+def get_api_key_service(session: DbSession) -> ApiKeyService:
+    return ApiKeyService(ApiKeyRepository(session))
+
+
+ApiKeyServiceDep = Annotated[ApiKeyService, Depends(get_api_key_service)]

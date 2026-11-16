@@ -43,3 +43,9 @@ class IdempotencyKeyReused(Exception):
             f"Idempotency-Key {idempotency_key!r} was already used for a "
             f"different request on endpoint {endpoint_id}"
         )
+
+
+class ApiKeyNotFound(Exception):
+    def __init__(self, key_id: UUID) -> None:
+        self.key_id = key_id
+        super().__init__(f"API key {key_id} not found")
