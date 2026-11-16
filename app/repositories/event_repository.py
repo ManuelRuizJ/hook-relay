@@ -19,6 +19,16 @@ class EventRepository:
     async def get_by_id(self, event_id: UUID) -> Event | None:
         return await self.session.get(Event, event_id)
 
+    async def get_by_idempotency_key(
+        self, endpoint_id: UUID, idempotency_key: str
+    ) -> Event | None:
+        stmt = select(Event).where(
+            Event.endpoint_id == endpoint_id,
+            Event.idempotency_key == idempotency_key,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_by_id_for_update(self, event_id: UUID) -> Event | None:
         """Load an event with a row lock held until the transaction ends.
 

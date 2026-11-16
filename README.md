@@ -4,7 +4,7 @@
 
 A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
-> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotency, a dead-letter queue, structured logging, Prometheus metrics and CI.
+> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotent ingestion, a dead-letter queue, structured logging, Prometheus metrics and CI.
 
 ## Status
 
@@ -98,8 +98,30 @@ docker compose -f docker-compose.yml up --build -d
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/endpoints/{id}/events` | Ingest an event. Returns `201` with `status: "pending"`. |
+| `POST` | `/api/v1/endpoints/{id}/events` | Ingest an event. Returns `201` with `status: "pending"`. Accepts an optional `Idempotency-Key` header. |
 | `GET` | `/api/v1/events/{id}` | Get event status, attempts, `next_attempt_at`, `last_error` and `delivered_at`. |
+
+### Idempotent ingestion
+
+A client that times out cannot tell whether its event was stored, so it retries. With an `Idempotency-Key` header, the retry is safe:
+
+| Request | Response |
+|---|---|
+| New key | `201`, event created and enqueued |
+| Same key, same body | `200` with `Idempotent-Replayed: true` and the original event; nothing is created or enqueued |
+| Same key, different body | `422`: the key was reused for a different request |
+| No key | `201`, a new event every time (previous behaviour) |
+
+```bash
+curl -s -X POST "http://localhost:8000/api/v1/endpoints/$ENDPOINT_ID/events" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-42-created" \
+  -d '{"event_type":"order.created","payload":{"order_id":42}}'
+```
+
+Keys are unique per endpoint and up to 255 characters; a UUID or a business identifier both work. "Same body" compares `event_type` and `payload` after normalizing key order and whitespace. A retry of a request that already succeeded is answered even if the endpoint has since been deactivated.
+
+This covers duplicates between the client and HookRelay. Delivery to receivers is still at-least-once, so receivers should deduplicate on the `X-HookRelay-Id` header.
 
 ### Dead-letter queue
 
@@ -295,6 +317,8 @@ The following implementation decisions are useful to understand when reviewing t
 - **Orphan reaper as a sibling task.** A second asyncio task in the worker process scans PostgreSQL every 30s for stale `pending` events (batches of 100, oldest first) using `SELECT ... FOR UPDATE SKIP LOCKED`, so several reapers never double-enqueue. It advances `next_attempt_at` before `LPUSH` to avoid re-picking the same event on the next cycle. A failed cycle is logged and retried; it never stops the worker, and the task is cancelled cleanly on shutdown.
 
 - **Claim timeout from `updated_at`, no extra column.** `mark_in_progress` is the last write to an `in_progress` row, so `updated_at` already records the claim time. The 120s timeout is roughly five times the worst-case HTTP timeout, so a slow but live worker is not preempted. If one ever were, the event could be delivered twice, which at-least-once delivery already allows.
+
+- **Idempotency keys are enforced by the database.** A `UNIQUE (endpoint_id, idempotency_key)` constraint guarantees one event per key, even when two retries arrive at the same moment: both may pass the initial lookup, but only one insert wins; the other catches the `IntegrityError` and returns the winner as a replay. The key and a SHA-256 fingerprint of the body live on the event row, so they need no separate store and are deleted with the endpoint.
 
 - **PostgreSQL is the dead-letter queue.** `failed` already means "retries exhausted", so the DLQ is a query, not a second store. A Redis list would duplicate that state and could drift from it. Replay and discard lock the row (`SELECT ... FOR UPDATE`), so a double-clicked replay enqueues the event once and the second request gets `409`. Replay follows the ingestion contract: commit, then best-effort `LPUSH`, with the orphan reaper as the fallback.
 

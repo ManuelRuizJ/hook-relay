@@ -31,3 +31,15 @@ class InvalidEventTransition(Exception):
         super().__init__(
             f"Cannot {action} event {event_id}: status is '{status.value}'"
         )
+
+
+class IdempotencyKeyReused(Exception):
+    """An Idempotency-Key was sent again with a different request body."""
+
+    def __init__(self, endpoint_id: UUID, idempotency_key: str) -> None:
+        self.endpoint_id = endpoint_id
+        self.idempotency_key = idempotency_key
+        super().__init__(
+            f"Idempotency-Key {idempotency_key!r} was already used for a "
+            f"different request on endpoint {endpoint_id}"
+        )

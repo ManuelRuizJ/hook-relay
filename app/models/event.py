@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy import Enum as SAEnum
@@ -72,7 +73,20 @@ class Event(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Optional client-supplied key that makes ingestion retry-safe. The
+    # fingerprint (SHA-256 of event_type + payload) detects a key reused
+    # for a different request.
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     __table_args__ = (
         # Para el worker de Fase 4: "dame los pending cuya hora ya llegó".
         Index("ix_events_status_next_attempt_at", "status", "next_attempt_at"),
+        # One event per key per endpoint. Postgres treats NULLs as distinct,
+        # so events ingested without a key are unaffected.
+        UniqueConstraint(
+            "endpoint_id",
+            "idempotency_key",
+            name="uq_events_endpoint_id_idempotency_key",
+        ),
     )
