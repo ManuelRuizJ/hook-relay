@@ -4,7 +4,7 @@
 
 A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
-> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotent ingestion, a dead-letter queue, structured logging, Prometheus metrics and CI.
+> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotent ingestion, API key authentication, a dead-letter queue, structured logging, Prometheus metrics and CI.
 
 ## Status
 
@@ -49,8 +49,8 @@ PostgreSQL is the source of truth: an event is committed before it is enqueued. 
 
 ```bash
 # 1. Clone
-git clone https://github.com/<you>/hookrelay.git
-cd hookrelay
+git clone https://github.com/ManuelRuizJ/hook-relay.git
+cd hook-relay
 
 # 2. Configure
 cp .env.example .env
@@ -63,9 +63,18 @@ docker compose up --build -d
 # 4. Wait for the API healthcheck
 until curl -sf http://localhost:8000/health > /dev/null; do sleep 1; done
 
-# 5. Open the interactive API documentation
+# 5. Create the database schema
+docker compose exec api alembic upgrade head
+
+# 6. Create the first API key (printed once) and keep it in your shell
+export HOOKRELAY_API_KEY=$(docker compose exec -T api \
+  python -m app.cli create-api-key --name admin | tail -1)
+
+# 7. Open the interactive API documentation ("Authorize" accepts the key)
 xdg-open http://localhost:8000/docs
 ```
+
+If port 8000 is taken on your machine, set `API_PORT` in `.env` (for example `API_PORT=8080`) and use that port in the URLs below.
 
 For production, run Compose without the development override:
 
@@ -77,12 +86,38 @@ docker compose -f docker-compose.yml up --build -d
 
 | Service | Role | Ports |
 |---|---|---|
-| `api` | FastAPI HTTP server (ingest, query, DLQ, `/metrics`, health probes) | `8000` |
+| `api` | FastAPI HTTP server (ingest, query, DLQ, API keys, `/metrics`, health probes) | `8000` (`API_PORT`) |
 | `worker` | BRPOP loop, delivers events, retries and reaper; serves its own `/metrics` | `9100` (published in dev only) |
 | `db` | PostgreSQL 16 | Internal |
 | `redis` | Redis 7 (queue + delayed sorted set) | Internal |
 
 ## API
+
+### Authentication
+
+Every `/api/v1` route requires an API key:
+
+```bash
+curl -s http://localhost:8000/api/v1/endpoints \
+  -H "Authorization: Bearer $HOOKRELAY_API_KEY"
+```
+
+A missing, unknown or revoked key gets `401` with `WWW-Authenticate: Bearer`. `/health`, `/health/ready`, `/metrics` and `/docs` stay open for probes, Prometheus and the documentation.
+
+Keys look like `hr_` followed by 43 random characters (256 bits). Only their SHA-256 hash is stored, so a key is shown exactly once, when it is created.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/api-keys` | Create a key: `{"name": "billing-service"}`. The response includes `key`, only this once. |
+| `GET` | `/api/v1/api-keys` | List keys with `name`, `prefix` (e.g. `hr_AbCd1234`) and `revoked_at`. Never the key. |
+| `DELETE` | `/api/v1/api-keys/{id}` | Revoke a key. Effective on the next request; idempotent. |
+
+The first key, or a new one after revoking them all, comes from the CLI, which needs no key:
+
+```bash
+docker compose exec api python -m app.cli create-api-key --name admin
+docker compose exec api python -m app.cli list-api-keys
+```
 
 ### Webhook endpoints
 
@@ -114,6 +149,7 @@ A client that times out cannot tell whether its event was stored, so it retries.
 
 ```bash
 curl -s -X POST "http://localhost:8000/api/v1/endpoints/$ENDPOINT_ID/events" \
+  -H "Authorization: Bearer $HOOKRELAY_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: order-42-created" \
   -d '{"event_type":"order.created","payload":{"order_id":42}}'
@@ -133,17 +169,20 @@ This covers duplicates between the client and HookRelay. Delivery to receivers i
 
 ```bash
 # Inspect the dead-letter queue, then replay one event after fixing the receiver
-curl -s http://localhost:8000/api/v1/dead-letters
-curl -s -X POST "http://localhost:8000/api/v1/events/$EVENT_ID/replay"
+curl -s http://localhost:8000/api/v1/dead-letters \
+  -H "Authorization: Bearer $HOOKRELAY_API_KEY"
+curl -s -X POST "http://localhost:8000/api/v1/events/$EVENT_ID/replay" \
+  -H "Authorization: Bearer $HOOKRELAY_API_KEY"
 ```
 
 ## Quick start
 
-Create an endpoint, save its returned ID and signing secret, and then submit an event:
+With `HOOKRELAY_API_KEY` set (see [How to run](#how-to-run)), create an endpoint, save its returned ID and signing secret, and then submit an event:
 
 ```bash
 # Create an endpoint
 RESP=$(curl -s -X POST http://localhost:8000/api/v1/endpoints \
+  -H "Authorization: Bearer $HOOKRELAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com/hooks","description":"demo"}')
 
@@ -151,6 +190,7 @@ ENDPOINT_ID=$(echo "$RESP" | python -c "import sys,json;print(json.load(sys.stdi
 
 # Ingest an event
 curl -s -X POST "http://localhost:8000/api/v1/endpoints/$ENDPOINT_ID/events" \
+  -H "Authorization: Bearer $HOOKRELAY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"event_type":"order.created","payload":{"order_id":42}}'
 
@@ -324,6 +364,8 @@ The following implementation decisions are useful to understand when reviewing t
 
 - **Flat `/events/{id}` route.** Event IDs are UUIDs, so the parent endpoint is not required to retrieve an event.
 
+- **API keys are hashed with SHA-256, not bcrypt.** A key is 256 random bits, so there is nothing to brute-force; slow hashes exist to protect low-entropy human passwords. Lookup is by hash on a unique index, so the plaintext is never stored or compared. The `hr_` prefix makes a leaked key easy for secret scanners to recognise. There is deliberately no switch to disable authentication: the test suite authenticates with real keys instead.
+
 - **Secret returned once.** Only the response schema used by `POST /endpoints` exposes the signing secret. Listing and retrieving endpoints do not return it.
 
 - **Non-root container.** The `appuser` account maps to the host UID/GID through build arguments, allowing bind mounts and Alembic revision generation without `sudo`.
@@ -409,6 +451,18 @@ docker compose logs worker | grep "stuck in_progress"
 ```
 
 Expect `Released N stuck in_progress event(s): X rescheduled, Y failed`.
+
+### `401 Unauthorized` from `/api/v1`
+
+The request has no `Authorization: Bearer <key>` header, or the key is unknown or revoked. List keys with `docker compose exec api python -m app.cli list-api-keys` and create a new one with `create-api-key` if needed. Remember that a key is printed only once.
+
+### `relation "events" does not exist` (or any missing table)
+
+The schema has not been created. Apply the migrations:
+
+```bash
+docker compose exec api alembic upgrade head
+```
 
 ### Worker logs `Worker loop failed; retrying in Ns`
 
