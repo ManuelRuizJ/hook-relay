@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.api import ops
+from app.api.auth import require_api_key
 from app.api.metrics import PrometheusMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -26,4 +27,8 @@ app = FastAPI(
 )
 app.add_middleware(PrometheusMiddleware)
 app.include_router(ops.router)
-app.include_router(api_router, prefix="/api/v1")
+# Every /api/v1 route requires an API key; ops endpoints (health, metrics)
+# stay open for probes and Prometheus.
+app.include_router(
+    api_router, prefix="/api/v1", dependencies=[Depends(require_api_key)]
+)
