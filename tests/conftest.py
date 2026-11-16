@@ -14,8 +14,9 @@ os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://redis:6379/1
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.redis import close_redis_client, get_redis_client
+from app.core.security import display_prefix, generate_api_key, hash_api_key
 from app.main import app
-from app.models import Base
+from app.models import ApiKey, Base
 
 TEST_DB_URL = settings.database_url.rsplit("/", 1)[0] + f"/{settings.postgres_db}_test"
 
@@ -31,7 +32,8 @@ async def db_engine():
 
 
 @pytest_asyncio.fixture(scope="function")
-async def client(db_engine):
+async def app_db(db_engine):
+    """Point the app's get_db dependency at the per-test database."""
     Session = async_sessionmaker(db_engine, expire_on_commit=False)
 
     async def _get_db_override():
@@ -44,11 +46,41 @@ async def client(db_engine):
                 raise
 
     app.dependency_overrides[get_db] = _get_db_override
+    yield
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def api_key(db_engine) -> str:
+    """Plaintext of an active API key stored in the test database."""
+    raw = generate_api_key()
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with Session() as session:
+        session.add(
+            ApiKey(name="tests", prefix=display_prefix(raw), key_hash=hash_api_key(raw))
+        )
+        await session.commit()
+    return raw
+
+
+@pytest_asyncio.fixture(scope="function")
+async def anon_client(app_db):
+    """HTTP client without credentials, for authentication tests."""
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
         yield ac
-    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def client(app_db, api_key):
+    """HTTP client authenticated with a real API key, like a real caller."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {api_key}"},
+    ) as ac:
+        yield ac
 
 
 @pytest_asyncio.fixture(scope="function")
