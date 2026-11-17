@@ -11,6 +11,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 # Override with TEST_REDIS_URL in CI if needed.
 os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://redis:6379/15")
 
+# The api container sets PROMETHEUS_MULTIPROC_DIR for its uvicorn workers.
+# Tests run in that same container; without this they would write samples
+# into the live API's directory and use a different metrics backend than CI.
+os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
+
 from app.api.deps import get_redis
 from app.core.config import settings
 from app.core.database import get_db

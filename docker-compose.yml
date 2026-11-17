@@ -33,6 +33,15 @@ services:
         GID: ${HOST_GID:-1000}
     env_file:
       - .env
+    environment:
+      # Uvicorn worker processes (it reads WEB_CONCURRENCY). One Python
+      # process tops out at about one CPU core; see loadtest/README.md.
+      WEB_CONCURRENCY: ${API_WORKERS:-4}
+      # Shared Prometheus samples across those processes. tmpfs, so it is
+      # empty on every container start, as prometheus_client requires.
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus
+    tmpfs:
+      - /tmp/prometheus
     ports:
       - "${API_PORT:-8000}:8000"
     restart: unless-stopped
@@ -56,6 +65,10 @@ services:
         GID: ${HOST_GID:-1000}
     command: ["python", "-m", "app.worker"]
     restart: unless-stopped
+    environment:
+      # The worker uses at most two sessions at once (delivery and reaper).
+      DB_POOL_SIZE: 3
+      DB_MAX_OVERFLOW: 2
     # Prometheus scrapes the worker's own /metrics on the Compose network.
     expose:
       - "9100"
