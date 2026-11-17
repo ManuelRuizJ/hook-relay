@@ -65,6 +65,26 @@ function scrape() {
   };
 }
 
+// The test receiver counts every POST it gets. Compared with how many events
+// ended up delivered, the difference is duplicate deliveries. Returns null
+// for a receiver that does not expose /count.
+function receiverCount() {
+  const res = http.get(RECEIVER.replace(/\/hooks$/, '/count'), { tags: { name: 'receiver' } });
+  return res.status === 200 ? parseInt(res.body, 10) : null;
+}
+
+function pendingWork(state) {
+  return state.delivery + state.delayed + state.pending + state.inProgress;
+}
+
+function waitUntilIdle(timeoutSeconds) {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  while (pendingWork(scrape()) > 0) {
+    if (Date.now() > deadline) throw new Error('system not idle before the run');
+    sleep(0.5);
+  }
+}
+
 export function setup() {
   if (!KEY) throw new Error('HOOKRELAY_API_KEY is required');
   const res = http.post(
@@ -73,7 +93,14 @@ export function setup() {
     { headers: headers() },
   );
   if (res.status !== 201) throw new Error(`endpoint create failed: ${res.status} ${res.body}`);
-  return { endpointId: res.json('id') };
+  // Start from an idle system. Leftover work (e.g. the warm-up's backlog)
+  // would inflate this run's drain time, and deliveries completing between
+  // the two counter reads below would show up as phantom duplicates.
+  if (!__ENV.SKIP_DRAIN) waitUntilIdle(120);
+  return {
+    endpointId: res.json('id'),
+    before: { received: receiverCount(), delivered: scrape().delivered },
+  };
 }
 
 export default function (data) {
@@ -92,17 +119,24 @@ export default function (data) {
   check(res, { 'ingest returns 201': (r) => r.status === 201 });
 }
 
-export function teardown() {
+export function teardown(data) {
   if (__ENV.SKIP_DRAIN) return;
   const started = Date.now();
   let state = scrape();
-  while (state.delivery + state.delayed + state.pending + state.inProgress > 0) {
+  while (pendingWork(state) > 0) {
     sleep(0.5);
     state = scrape();
   }
   const drainSeconds = (Date.now() - started) / 1000;
+  const received = receiverCount();
+  // Every attempt reaches this receiver and succeeds, so each POST beyond
+  // one per delivered event is a duplicate delivery.
+  const duplicates =
+    received === null || data.before.received === null
+      ? 'n/a'
+      : received - data.before.received - (state.delivered - data.before.delivered);
   console.log(
     `DRAIN backlog_cleared_after_ingest_s=${drainSeconds.toFixed(1)} ` +
-      `delivered=${state.delivered} failed=${state.failed}`,
+      `delivered=${state.delivered} failed=${state.failed} duplicates=${duplicates}`,
   );
 }

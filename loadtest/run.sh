@@ -73,12 +73,14 @@ if not iterations:
 lat = re.search(r"\{ name:ingest \}\.+: avg=\S+\s+med=(\S+)\s+p\(95\)=(\S+)\s+p\(99\)=(\S+)", text)
 failed = re.findall(r"\{ name:ingest \}\.+: ([0-9.]+%)", text)
 drain = re.search(r"backlog_cleared_after_ingest_s=([0-9.]+)", text)
+dups = re.search(r"duplicates=(-?\d+|n/a)", text)
 n = int(iterations[1])
 line = (f"run {run}: api_workers={api_workers} workers={workers} target={rate}/s "
         f"ingest={n / seconds:.1f}/s med={lat[1]} p95={lat[2]} p99={lat[3]} "
         f"errors={failed[0] if failed else '?'}")
 if drain:
     line += f" drain={drain[1]}s end_to_end={n / (seconds + float(drain[1])):.1f}/s"
+    line += f" duplicates={dups[1] if dups else '?'}"
 print(line, flush=True)
 PY
 done
