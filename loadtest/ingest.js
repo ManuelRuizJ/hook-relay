@@ -6,7 +6,8 @@
 // and report how long the worker took to drain the backlog.
 //
 // Env: HOOKRELAY_API_KEY (required), RATE (events/s, default 200),
-// DURATION (default 60s), API_URL, RECEIVER_URL.
+// DURATION (default 60s), API_URL, RECEIVER_URL, SKIP_DRAIN (set to any
+// value to measure ingestion only and skip waiting for deliveries).
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -92,6 +93,7 @@ export default function (data) {
 }
 
 export function teardown() {
+  if (__ENV.SKIP_DRAIN) return;
   const started = Date.now();
   let state = scrape();
   while (state.delivery + state.delayed + state.pending + state.inProgress > 0) {
