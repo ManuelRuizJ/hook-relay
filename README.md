@@ -8,7 +8,7 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
 ## Status
 
-✅ v1.0.0: all 6 phases complete, plus idempotent ingestion, API key authentication and a load test.
+✅ v1.0.1: all 6 phases complete, plus idempotent ingestion, API key authentication and a load test.
 
 ## Roadmap
 
@@ -434,7 +434,7 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 |---|---|
 | Lint | `ruff check` and `ruff format --check` |
 | Tests | Postgres 16 and Redis 7 service containers, migrations applied from scratch, `alembic check` for model/migration drift, then `pytest` |
-| Docker image | The production Dockerfile builds |
+| Docker image | The production Dockerfile builds, and `scripts/compose_smoke_test.sh` starts the production stack, checks health and metrics, restarts the API and checks them again |
 
 ## Troubleshooting
 

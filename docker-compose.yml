@@ -41,7 +41,11 @@ services:
       # empty on every container start, as prometheus_client requires.
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus
     tmpfs:
-      - /tmp/prometheus
+      # The mode must be explicit. Without it Docker mounts the tmpfs as 1777
+      # when the container is created but as root-owned 755 when it restarts
+      # (e.g. after a host reboot), and the non-root app can no longer write
+      # its samples: /metrics returns 500 and no metric is recorded.
+      - /tmp/prometheus:mode=1777
     ports:
       - "${API_PORT:-8000}:8000"
     restart: unless-stopped
