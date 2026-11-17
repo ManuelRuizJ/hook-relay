@@ -202,3 +202,25 @@ async def test_handle_event_counts_delivery_outcome(
 
     assert sample("hookrelay_deliveries_total", outcome=outcome) == counted_before + 1
     assert sample("hookrelay_delivery_duration_seconds_count") == timed_before + 1
+
+
+async def test_delivery_identifies_hookrelay_version(db_engine, redis_client):
+    """Receivers see the same version the API reports in its OpenAPI docs."""
+    from app import __version__
+    from app.main import app as api_app
+
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with Session() as session:
+        event = await _seed_event(session, url="http://receiver.example/hooks")
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["user_agent"] = request.headers["User-Agent"]
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await _handle_event(client, str(event.id))
+
+    assert seen["user_agent"] == f"HookRelay/{__version__}"
+    assert api_app.version == __version__
