@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app import __version__
 from app.models.event import Event
 from app.models.webhook_endpoint import WebhookEndpoint
 from app.worker.metrics import DELIVERY_DURATION
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # A slow receiver is a broken receiver. Keep the worker responsive.
 HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
-USER_AGENT = "HookRelay/0.4"
+USER_AGENT = f"HookRelay/{__version__}"
 
 
 @dataclass

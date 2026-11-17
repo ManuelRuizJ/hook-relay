@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 
+from app import __version__
 from app.api import ops
 from app.api.auth import require_api_key
 from app.api.metrics import PrometheusMiddleware
@@ -22,7 +23,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="HookRelay",
     description="Webhook delivery service with retries and dead-letter queue.",
-    version="0.2.1",
+    version=__version__,
     lifespan=lifespan,
 )
 app.add_middleware(PrometheusMiddleware)
