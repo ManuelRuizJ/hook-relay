@@ -24,7 +24,7 @@ Each invocation starts a **fresh, isolated Compose project** (`hrload`) with its
 | [`run.sh`](run.sh) | Starts the stack, runs migrations, creates an API key, runs one unreported 10s warm-up, then the measured runs. |
 | [`../docker-compose.loadtest.yml`](../docker-compose.loadtest.yml) | Adds the receiver and k6 (`grafana/k6:0.55.0`) to the stack. |
 
-**Methodology.** Ceilings are measured with a demand far above capacity (1000/s), so the achieved rate is the ceiling. Every configuration is repeated at least three times and reported as median plus range, because single runs on a laptop varied by up to 2x. The achieved ingest rate is `iterations / ingest duration`; k6's own `iterations/s` also counts the drain phase.
+**Methodology.** Ceilings are measured with a demand far above capacity (1000/s), so the achieved rate is the ceiling. Every configuration is repeated at least three times and reported as median plus range, because single runs on a laptop varied by up to 2x. The achieved ingest rate is `iterations / ingest duration`; k6's own `iterations/s` also counts the drain phase. End-to-end runs start from an idle system (no queued or in-flight work), and report duplicate deliveries: the receiver's POST count minus the events delivered.
 
 **Machine.** Laptop with an AMD Ryzen 7 5700U (8 cores, 16 threads) and 14 GiB RAM. Docker 29.9 on Fedora. k6, the receiver and the whole stack share the same machine, so absolute numbers are conservative. The ratios between configurations are what matter.
 
@@ -52,12 +52,12 @@ Before these changes, a single process at **150/s** already had p95 = **716 ms**
 
 | Delivery workers | Backlog cleared after ingest stops | Delivery capacity* |
 |---|---|---|
-| 1 | 89–120 s | **~79/s** (67–81) |
-| 3 | 4–8 s | **≥ 184/s**: nearly keeps up with ingestion |
+| 1 | 74–87 s | **~86/s** (82–89) |
+| 3 | 2–3 s | **≥ 192/s**: keeps up with ingestion |
 
 \*From the backlog: with offered load L for 60 s and drain time T, capacity C satisfies `C × (60 + T) = L × 60`.
 
-No event was lost or delivered as `failed` in any run.
+No event was lost or delivered as `failed`, and no event was delivered twice, in any run. Checked against the database after three runs: 37,980 events, 37,980 POSTs at the receiver, none with more than one attempt.
 
 ## What the measurements found
 
@@ -86,6 +86,22 @@ Each fix alone was inconclusive. The async dependencies alone even made latency 
 ### 4. Delivery scales with worker containers
 
 `docker compose up -d --scale worker=3` works without changes. Workers share the queue through `BRPOP`, and the reapers use `SELECT ... FOR UPDATE SKIP LOCKED`. Each worker handles one event at a time, and spends most of that time on database round trips (claim and outcome are separate commits) rather than on the HTTP call (~2.3 ms). PostgreSQL reaches about one core under the combined load.
+
+### 5. Duplicate deliveries under backlog (fixed in v1.0.2)
+
+The Grafana dashboard showed the orphan reaper "recovering" about 100 events during a load run in which no worker had died. The cause was two bugs together:
+
+- **The orphan reaper treated any `pending` event older than 30 s as orphaned.** Behind a backlog longer than that, it re-enqueued events that were simply waiting in the Redis list.
+- **The worker delivered whatever it popped.** It did not check the status, and its claim was not atomic.
+
+Result: **200 of 8,993 events reached the receiver twice**, and the harness, once taught to count them, reported **500 duplicates in a single run of v1.0.1**.
+
+The fixes:
+
+- **Atomic claim.** The worker locks the row (`FOR UPDATE`) and skips events that are no longer `pending`. Skips are counted in `hookrelay_deliveries_skipped_total`.
+- **Queue-aware orphan pass.** The reaper excludes ids still in the delivery list or the delayed ZSET.
+
+With both fixes the same scenario reports 0 duplicates, and end-to-end throughput rose because no time is spent re-delivering. The earlier published delivery numbers (~79/s and ≥184/s) were measured with the bug present and with the warm-up's backlog spilling into the run. The table above replaces them.
 
 ## Not covered
 
