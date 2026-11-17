@@ -232,3 +232,6 @@ venv/
 
 # .
 alembic/__pycache__/
+# The venv template above ignores every "scripts" directory (the Windows
+# venv layout). The repository's own top-level scripts/ is source code.
+!/scripts/
