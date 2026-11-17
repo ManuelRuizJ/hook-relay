@@ -191,3 +191,47 @@ async def test_recent_in_progress_is_left_to_its_worker(db_engine, redis_client)
         refreshed = await session.get(Event, event_id)
         assert refreshed.status == EventStatus.IN_PROGRESS
     assert await redis_client.zcard(WEBHOOK_DELAYED_QUEUE) == 0
+
+
+async def test_orphan_pass_ignores_events_still_waiting_in_redis(
+    db_engine, redis_client
+):
+    """Regression: old but queued is not orphaned.
+
+    Behind a backlog longer than the stale threshold, pending events sit in
+    the delivery list. Re-enqueueing them created duplicate deliveries.
+    """
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    stale = datetime.now(UTC) - timedelta(minutes=5)
+    async with Session() as session:
+        in_list = await _seed_pending_event(session, next_attempt_at=stale)
+        in_zset = await _seed_pending_event(session, next_attempt_at=stale)
+        orphan = await _seed_pending_event(session, next_attempt_at=stale)
+    await redis_client.lpush(WEBHOOK_DELIVERY_QUEUE, str(in_list.id))
+    await redis_client.zadd(WEBHOOK_DELAYED_QUEUE, {str(in_zset.id): stale.timestamp()})
+
+    moved = await reap_orphaned_events(Session, redis_client)
+
+    assert moved == 1
+    queue = await redis_client.lrange(WEBHOOK_DELIVERY_QUEUE, 0, -1)
+    assert sorted(queue) == sorted([str(in_list.id), str(orphan.id)])
+    async with Session() as session:
+        untouched = await session.get(Event, in_list.id)
+        assert untouched.next_attempt_at == stale
+
+
+async def test_orphan_pass_skips_cycle_when_backlog_too_large(
+    db_engine, redis_client, monkeypatch
+):
+    import app.worker.reaper as reaper
+
+    monkeypatch.setattr(reaper, "MAX_QUEUED_IDS_TO_SCAN", 1)
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with Session() as session:
+        await _seed_pending_event(
+            session, next_attempt_at=datetime.now(UTC) - timedelta(minutes=5)
+        )
+    await redis_client.lpush(WEBHOOK_DELIVERY_QUEUE, "a", "b")
+
+    assert await reap_orphaned_events(Session, redis_client) == 0
+    assert await redis_client.llen(WEBHOOK_DELIVERY_QUEUE) == 2
