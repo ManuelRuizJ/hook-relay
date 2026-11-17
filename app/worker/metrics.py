@@ -28,6 +28,11 @@ REAPER_RECOVERED = Counter(
     "Events recovered by the reaper, by kind.",
     ["kind"],
 )
+DELIVERIES_SKIPPED = Counter(
+    "hookrelay_deliveries_skipped_total",
+    "Queue entries dropped without delivering because the event was no "
+    "longer pending: already delivered, or claimed by another worker.",
+)
 WORKER_LOOP_ERRORS = Counter(
     "hookrelay_worker_loop_errors_total",
     "Main-loop iterations that raised (e.g. Redis or Postgres unreachable) "

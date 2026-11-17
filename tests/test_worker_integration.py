@@ -224,3 +224,66 @@ async def test_delivery_identifies_hookrelay_version(db_engine, redis_client):
 
     assert seen["user_agent"] == f"HookRelay/{__version__}"
     assert api_app.version == __version__
+
+
+async def test_handle_event_skips_already_delivered_event(db_engine, redis_client):
+    """Regression: a duplicate queue entry for a delivered event is dropped.
+
+    The orphan reaper used to re-enqueue events still waiting behind a
+    backlog, and the worker delivered whatever it popped, so receivers got
+    the same event twice (200 of 8993 in a load run).
+    """
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with Session() as session:
+        event = await _seed_event(session, url="http://receiver.example/hooks")
+        event.status = EventStatus.DELIVERED
+        event.attempts = 1
+        await session.commit()
+        event_id = event.id
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    skipped_before = sample("hookrelay_deliveries_skipped_total")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await _handle_event(client, str(event_id))
+
+    assert calls == 0
+    refreshed = await _fetch_event(db_engine, event_id)
+    assert refreshed.status == EventStatus.DELIVERED
+    assert refreshed.attempts == 1
+    assert sample("hookrelay_deliveries_skipped_total") == skipped_before + 1
+
+
+async def test_concurrent_duplicates_are_delivered_once(db_engine, redis_client):
+    """Two workers popping the same id at once: the row lock lets exactly
+    one claim it; the other sees in_progress and skips."""
+    import asyncio
+
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with Session() as session:
+        event = await _seed_event(session, url="http://receiver.example/hooks")
+        event_id = event.id
+
+    calls = 0
+
+    async def slow_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.2)  # keep the first delivery in flight
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slow_handler)) as client:
+        await asyncio.gather(
+            _handle_event(client, str(event_id)),
+            _handle_event(client, str(event_id)),
+        )
+
+    assert calls == 1
+    refreshed = await _fetch_event(db_engine, event_id)
+    assert refreshed.status == EventStatus.DELIVERED
+    assert refreshed.attempts == 1
