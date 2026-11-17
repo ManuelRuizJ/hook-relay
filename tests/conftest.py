@@ -11,6 +11,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 # Override with TEST_REDIS_URL in CI if needed.
 os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://redis:6379/15")
 
+# The api container sets PROMETHEUS_MULTIPROC_DIR for its uvicorn workers.
+# Tests run in that same container; without this they would write samples
+# into the live API's directory and use a different metrics backend than CI.
+os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
+
+from app.api.deps import get_redis
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.redis import close_redis_client, get_redis_client
@@ -100,7 +106,7 @@ async def redis_client():
 
 @pytest_asyncio.fixture(scope="function")
 async def failing_redis():
-    """Override get_redis_client with a fake whose every call fails.
+    """Override the Redis dependency with a fake whose every call fails.
 
     Used to prove that event ingestion survives a Redis outage (the API
     still returns 201 and the event stays ``pending`` in Postgres), and
@@ -118,6 +124,10 @@ async def failing_redis():
             pass
 
     fake = _FailingRedis()
-    app.dependency_overrides[get_redis_client] = lambda: fake
+
+    async def _failing():
+        return fake
+
+    app.dependency_overrides[get_redis] = _failing
     yield fake
-    app.dependency_overrides.pop(get_redis_client, None)
+    app.dependency_overrides.pop(get_redis, None)

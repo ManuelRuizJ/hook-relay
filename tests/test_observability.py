@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import sys
 from uuid import UUID
 
@@ -195,3 +196,45 @@ async def test_ops_endpoints_are_not_versioned(client, redis_client):
     """Ops endpoints live at the root so scrapers and probes need no prefix."""
     assert (await client.get("/metrics")).status_code == 200
     assert (await client.get("/api/v1/metrics")).status_code == 404
+
+
+def test_metrics_aggregate_across_processes_in_multiprocess_mode(tmp_path):
+    """With PROMETHEUS_MULTIPROC_DIR set (several uvicorn workers), /metrics
+    must merge samples written by every process, and state gauges must use
+    a mode valid for that backend. Runs in subprocesses because the backend
+    is chosen when prometheus_client is first imported."""
+    import subprocess
+
+    code = """
+import os, sys
+from app.api.metrics import EVENTS, HTTP_REQUESTS
+if sys.argv[1] == "write":
+    HTTP_REQUESTS.labels("GET", "/x", "200").inc(int(sys.argv[2]))
+    EVENTS.labels("failed").set(int(sys.argv[2]))
+else:
+    from prometheus_client import generate_latest
+    from app.api.ops import _registry
+    print(generate_latest(_registry()).decode())
+"""
+    env = {**os.environ, "PROMETHEUS_MULTIPROC_DIR": str(tmp_path)}
+
+    def run(*args):
+        result = subprocess.run(
+            [sys.executable, "-c", code, *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout
+
+    run("write", "2")  # two processes, as two uvicorn workers would be
+    run("write", "3")
+    text = run("read")
+
+    assert (
+        'hookrelay_http_requests_total{method="GET",route="/x",status="200"} 5.0'
+        in text
+    )
+    # "mostrecent": the latest value, not 2 + 3.
+    assert 'hookrelay_events{status="failed"} 3.0' in text

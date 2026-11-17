@@ -35,15 +35,20 @@ HTTP_LATENCY = Histogram(
     "Time spent handling HTTP requests.",
     ["method", "route"],
 )
+# With several API processes, whichever one serves the scrape refreshes
+# these; "mostrecent" reports that latest value instead of summing stale
+# copies from the other processes. Ignored in single-process mode.
 QUEUE_DEPTH = Gauge(
     "hookrelay_queue_depth",
     "Events waiting in each Redis queue (delivery list, delayed ZSET).",
     ["queue"],
+    multiprocess_mode="mostrecent",
 )
 EVENTS = Gauge(
     "hookrelay_events",
     "Events in Postgres by status. status='failed' is the dead-letter queue.",
     ["status"],
+    multiprocess_mode="mostrecent",
 )
 
 

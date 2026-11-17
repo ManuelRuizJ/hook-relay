@@ -2,10 +2,17 @@
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable
 
 from fastapi import APIRouter, Response, status
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    REGISTRY,
+    CollectorRegistry,
+    generate_latest,
+    multiprocess,
+)
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -75,4 +82,18 @@ async def ready(
 )
 async def metrics(session: DbSession, redis: RedisDep) -> Response:
     await refresh_state_gauges(session, redis)
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(_registry()), media_type=CONTENT_TYPE_LATEST)
+
+
+def _registry() -> CollectorRegistry:
+    """Aggregate every API process when running several uvicorn workers.
+
+    Each process writes its samples to PROMETHEUS_MULTIPROC_DIR; a scrape
+    lands on one process, which merges them all. A single process uses the
+    default in-memory registry.
+    """
+    if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+        return REGISTRY
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    return registry

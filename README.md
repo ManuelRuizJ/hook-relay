@@ -4,7 +4,7 @@
 
 A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
-> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotent ingestion, API key authentication, a dead-letter queue, structured logging, Prometheus metrics and CI.
+> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotent ingestion, API key authentication, a dead-letter queue, structured logging, Prometheus metrics, CI and a reproducible load test.
 
 ## Status
 
@@ -86,8 +86,8 @@ docker compose -f docker-compose.yml up --build -d
 
 | Service | Role | Ports |
 |---|---|---|
-| `api` | FastAPI HTTP server (ingest, query, DLQ, API keys, `/metrics`, health probes) | `8000` (`API_PORT`) |
-| `worker` | BRPOP loop, delivers events, retries and reaper; serves its own `/metrics` | `9100` (published in dev only) |
+| `api` | FastAPI HTTP server (ingest, query, DLQ, API keys, `/metrics`, health probes), 4 uvicorn processes by default (`API_WORKERS`) | `8000` (`API_PORT`) |
+| `worker` | BRPOP loop, delivers events, retries and reaper; serves its own `/metrics`. Scale with `--scale worker=N` | `9100` (published in dev only) |
 | `db` | PostgreSQL 16 | Internal |
 | `redis` | Redis 7 (queue + delayed sorted set) | Internal |
 
@@ -311,6 +311,24 @@ $ curl -s localhost:8000/health/ready
 
 Failed checks report only the exception type; connection details stay in the logs.
 
+## Performance
+
+Measured with k6 on a laptop (Ryzen 7 5700U), with the whole stack, k6 and the receiver on the same machine. Every row is the median of at least three runs. The full method, raw ranges and what the measurements changed in the code are in [`loadtest/README.md`](loadtest/README.md).
+
+| Scenario | Result |
+|---|---|
+| Ingestion ceiling, 4 API processes | **~575 events/s** (×3 the original single process: ~193/s) |
+| Latency at 400 events/s | p50 **14 ms**, p95 **~40 ms**, 0% errors |
+| Latency at 200 events/s | p50 **8–9 ms**, p95 **11–21 ms** |
+| Delivery, 1 worker | ~79 events/s |
+| Delivery, 3 workers | ≥ 184 events/s; keeps up with 200/s ingestion |
+
+```bash
+loadtest/run.sh --api-workers 4 --workers 3 --rate 200 --duration 60s --reps 3
+```
+
+The load test found three problems that are now fixed. One Python process capped the API at a single CPU core, so the API now runs several uvicorn processes with Prometheus multiprocess metrics. Plain `def` dependencies cost thread hops on every request. The default connection pool kept reopening connections and paying Postgres' SCRAM handshake in the API's CPU.
+
 ## Signed deliveries
 
 Every delivery POST includes these headers:
@@ -365,6 +383,8 @@ The following implementation decisions are useful to understand when reviewing t
 - **Flat `/events/{id}` route.** Event IDs are UUIDs, so the parent endpoint is not required to retrieve an event.
 
 - **API keys are hashed with SHA-256, not bcrypt.** A key is 256 random bits, so there is nothing to brute-force; slow hashes exist to protect low-entropy human passwords. Lookup is by hash on a unique index, so the plaintext is never stored or compared. The `hr_` prefix makes a leaked key easy for secret scanners to recognise. There is deliberately no switch to disable authentication: the test suite authenticates with real keys instead.
+
+- **Several API processes, sized connection pools.** One Python process tops out at about one CPU core, so the API runs `API_WORKERS` uvicorn processes (default 4). Prometheus samples from every process are merged at scrape time (multiprocess mode, tmpfs directory, `mostrecent` state gauges). Each process has its own SQLAlchemy pool (`DB_POOL_SIZE` + `DB_MAX_OVERFLOW`, default 10 + 5) and the worker uses 3 + 2, keeping the total under Postgres' default of 100 connections. Raise `max_connections` before adding processes.
 
 - **Secret returned once.** Only the response schema used by `POST /endpoints` exposes the signing secret. Listing and retrieving endpoints do not return it.
 

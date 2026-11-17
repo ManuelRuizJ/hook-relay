@@ -13,15 +13,25 @@ from app.services.api_key_service import ApiKeyService
 from app.services.event_service import EventService
 from app.services.webhook_endpoint_service import WebhookEndpointService
 
+# Every provider here is `async def` on purpose. FastAPI runs plain `def`
+# dependencies in a thread pool, so each one costs a thread hop per request;
+# under load those hops, not the application code, dominated the profile.
+
+
+async def get_redis() -> Redis:
+    """The shared Redis client, as an async dependency (no thread hop)."""
+    return get_redis_client()
+
+
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-RedisDep = Annotated[Redis, Depends(get_redis_client)]
+RedisDep = Annotated[Redis, Depends(get_redis)]
 
 
-def get_webhook_endpoint_service(session: DbSession) -> WebhookEndpointService:
+async def get_webhook_endpoint_service(session: DbSession) -> WebhookEndpointService:
     return WebhookEndpointService(WebhookEndpointRepository(session))
 
 
-def get_event_service(session: DbSession, redis: RedisDep) -> EventService:
+async def get_event_service(session: DbSession, redis: RedisDep) -> EventService:
     return EventService(
         session=session,
         event_repo=EventRepository(session),
@@ -38,7 +48,7 @@ WebhookEndpointServiceDep = Annotated[
 EventServiceDep = Annotated[EventService, Depends(get_event_service)]
 
 
-def get_api_key_service(session: DbSession) -> ApiKeyService:
+async def get_api_key_service(session: DbSession) -> ApiKeyService:
     return ApiKeyService(ApiKeyRepository(session))
 
 

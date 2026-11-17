@@ -1,0 +1,28 @@
+# Load-test overlay: a trivial webhook receiver plus k6, on top of the
+# production compose file. Run it as a separate Compose project so it gets
+# its own empty database and never touches the development stack:
+#
+#   docker compose -p hrload -f docker-compose.yml -f docker-compose.loadtest.yml ...
+#
+# See loadtest/README.md for the full procedure.
+
+services:
+  receiver:
+    image: python:3.12-slim
+    command: ["python", "/loadtest/receiver.py"]
+    volumes:
+      - ./loadtest:/loadtest:ro
+
+  k6:
+    image: grafana/k6:0.55.0
+    profiles: ["tools"]  # only started by `docker compose run k6 ...`
+    volumes:
+      - ./loadtest:/scripts:ro
+    environment:
+      API_URL: http://api:8000
+      RECEIVER_URL: http://receiver:8080/hooks
+    depends_on:
+      api:
+        condition: service_healthy
+      receiver:
+        condition: service_started
