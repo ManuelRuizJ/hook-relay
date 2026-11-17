@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
     worker_metrics_port: int = 9100
+    # Connections kept open per process. SQLAlchemy's default (5, plus 10
+    # "overflow" connections closed after every use) churns connections
+    # under concurrency, and each new one pays Postgres' SCRAM handshake
+    # (4096 HMAC rounds) in this process's CPU.
+    # Every process has its own pool and Postgres allows 100 connections by
+    # default, so keep processes x (size + overflow) well under that.
+    db_pool_size: int = 10
+    db_max_overflow: int = 5
 
     @property
     def database_url(self) -> str:
