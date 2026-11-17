@@ -106,9 +106,14 @@ jobs:
   docker:
     name: Docker image
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Build image
         run: docker build --tag hookrelay:ci .
+
+      # Runs the production compose stack and restarts the API: a restart
+      # once broke /metrics while every unit test and the build passed.
+      - name: Smoke test the stack, including a restart
+        run: scripts/compose_smoke_test.sh
