@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -20,6 +21,11 @@ STALE_THRESHOLD_SECONDS = 30
 
 # Batch size: avoid saturating Redis if thousands are orphaned at once.
 BATCH_SIZE = 100
+
+# The orphan pass reads every id waiting in Redis to tell "orphaned" from
+# "still queued". Above this many it skips the cycle instead: a backlog
+# that large is being worked through, and real orphans are found later.
+MAX_QUEUED_IDS_TO_SCAN = 10_000
 
 # How long an event may stay `in_progress` before we assume the worker that
 # claimed it is gone. A delivery is bounded by HTTP_TIMEOUT (~25s worst
@@ -50,12 +56,26 @@ async def reap_orphaned_events(
     cutoff = datetime.now(UTC) - timedelta(seconds=stale_threshold_seconds)
     now = datetime.now(UTC)
 
+    # A pending event that is old but still in a Redis queue is not orphaned:
+    # it is waiting behind a backlog. Re-enqueueing it would create a
+    # duplicate entry (and, before the worker's status check, a duplicate
+    # delivery). Snapshot what is queued and leave those events alone.
+    queued_ids = await _queued_event_ids(redis)
+    if queued_ids is None:
+        logger.info(
+            "Orphan pass skipped: more than %d events waiting in Redis",
+            MAX_QUEUED_IDS_TO_SCAN,
+            extra={"max_scanned": MAX_QUEUED_IDS_TO_SCAN},
+        )
+        return 0
+
     async with session_factory() as session:
         stmt = (
             select(Event)
             .where(
                 Event.status == EventStatus.PENDING,
                 Event.next_attempt_at <= cutoff,
+                Event.id.not_in(queued_ids),
             )
             .order_by(Event.next_attempt_at.asc())
             .limit(batch_size)
@@ -85,6 +105,25 @@ async def reap_orphaned_events(
         extra={"count": len(events)},
     )
     return len(events)
+
+
+async def _queued_event_ids(redis: Redis) -> list[UUID] | None:
+    """Ids waiting in the delivery list or the delayed ZSET, or None if the
+    two together hold more than MAX_QUEUED_IDS_TO_SCAN entries."""
+    waiting = await redis.llen(WEBHOOK_DELIVERY_QUEUE) + await redis.zcard(
+        WEBHOOK_DELAYED_QUEUE
+    )
+    if waiting > MAX_QUEUED_IDS_TO_SCAN:
+        return None
+    raw = await redis.lrange(WEBHOOK_DELIVERY_QUEUE, 0, -1)
+    raw += await redis.zrange(WEBHOOK_DELAYED_QUEUE, 0, -1)
+    ids = set()
+    for value in raw:
+        try:
+            ids.add(UUID(value))
+        except ValueError:
+            continue  # malformed entries are dropped by the worker anyway
+    return list(ids)
 
 
 async def reap_stuck_in_progress(

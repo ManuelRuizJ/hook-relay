@@ -20,7 +20,7 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.webhook_endpoint_repository import WebhookEndpointRepository
 from app.services.event_service import EventService
 from app.worker.delivery import HTTP_TIMEOUT, deliver_event
-from app.worker.metrics import DELIVERIES, WORKER_LOOP_ERRORS
+from app.worker.metrics import DELIVERIES, DELIVERIES_SKIPPED, WORKER_LOOP_ERRORS
 from app.worker.reaper import reaper_loop
 
 logger = logging.getLogger(__name__)
@@ -35,10 +35,17 @@ LOOP_BACKOFF_MAX_SECONDS = 30.0
 async def _fetch_event_and_endpoint(
     session: AsyncSession, event_id: UUID
 ) -> tuple[Event, WebhookEndpoint] | None:
+    """Load the event with its row locked until the claim commits.
+
+    Two copies of the same id can be in the queue (a re-enqueue, a retry
+    promoted twice). The lock makes a second worker wait for the first
+    one's claim and then see that the event is no longer pending.
+    """
     stmt = (
         select(Event, WebhookEndpoint)
         .join(WebhookEndpoint, Event.endpoint_id == WebhookEndpoint.id)
         .where(Event.id == event_id)
+        .with_for_update(of=Event)
     )
     result = await session.execute(stmt)
     return result.one_or_none()
@@ -67,8 +74,23 @@ async def _handle_event(client: httpx.AsyncClient, event_id: str) -> None:
         event, endpoint = row
         log_ctx = {"event_id": str(event.id), "endpoint_id": str(endpoint.id)}
 
-        # Claim the event before the network call so a concurrent worker
-        # (Phase 5+) cannot also pick it up.
+        if event.status != EventStatus.PENDING:
+            # A duplicate queue entry: the event was already delivered,
+            # dead-lettered, or is being delivered by another worker.
+            # Delivering it again would send the receiver a duplicate.
+            status = event.status.value  # read before rollback expires it
+            await session.rollback()  # release the row lock
+            DELIVERIES_SKIPPED.inc()
+            logger.info(
+                "Skipping event %s: status is %s, not pending",
+                log_ctx["event_id"],
+                status,
+                extra={**log_ctx, "status": status},
+            )
+            return
+
+        # Claim while holding the row lock: mark_in_progress commits, so a
+        # concurrent worker waiting on the same row sees in_progress.
         service = EventService(
             session=session,
             event_repo=EventRepository(session),

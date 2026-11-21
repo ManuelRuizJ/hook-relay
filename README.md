@@ -8,7 +8,7 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
 ## Status
 
-✅ v1.0.1: all 6 phases complete, plus idempotent ingestion, API key authentication and a load test.
+✅ v1.0.2: all 6 phases complete, plus idempotent ingestion, API key authentication and a load test.
 
 ## Roadmap
 
@@ -223,7 +223,7 @@ pending ──claim──▶ in_progress ──success──▶ delivered
 
 `in_progress` represents an active claim. It lets the reaper distinguish an event being delivered from one abandoned by a worker that stopped unexpectedly.
 
-**Orphan recovery:** a `pending` event whose `next_attempt_at` is more than 30s in the past has no path back to the queue (the worker died before claiming it, or `LPUSH` failed after the commit). The orphan reaper runs every 30s inside the worker, pushes `next_attempt_at` forward another 30s and re-enqueues the event. `in_progress` events are not touched by this pass.
+**Orphan recovery:** a `pending` event whose `next_attempt_at` is more than 30s in the past has no path back to the queue (the worker died before claiming it, or `LPUSH` failed after the commit). The orphan reaper runs every 30s inside the worker, pushes `next_attempt_at` forward another 30s and re-enqueues the event. Events still waiting in the delivery list or the delayed ZSET are not orphans and are left alone, so a long backlog does not create duplicates. `in_progress` events are not touched by this pass.
 
 **Stuck claim recovery:** an event that stays `in_progress` for more than 120s was claimed by a worker that died mid-delivery (a live delivery is bounded by the HTTP timeout, about 25s). The same reaper task releases it with the rule used for a failed delivery: the lost attempt is not refunded, so the event goes back to `pending` with backoff on `webhooks:delayed`, or to `failed` when `max_attempts` is spent. `last_error` is set to `worker lost claim: in_progress timeout`.
 
@@ -320,8 +320,9 @@ Measured with k6 on a laptop (Ryzen 7 5700U), with the whole stack, k6 and the r
 | Ingestion ceiling, 4 API processes | **~575 events/s** (×3 the original single process: ~193/s) |
 | Latency at 400 events/s | p50 **14 ms**, p95 **~40 ms**, 0% errors |
 | Latency at 200 events/s | p50 **8–9 ms**, p95 **11–21 ms** |
-| Delivery, 1 worker | ~79 events/s |
-| Delivery, 3 workers | ≥ 184 events/s; keeps up with 200/s ingestion |
+| Delivery, 1 worker | ~86 events/s |
+| Delivery, 3 workers | ≥ 192 events/s; keeps up with 200/s ingestion |
+| Duplicate deliveries | 0 in every run (receiver POSTs = delivered events) |
 
 ```bash
 loadtest/run.sh --api-workers 4 --workers 3 --rate 200 --duration 60s --reps 3
@@ -373,6 +374,8 @@ The following implementation decisions are useful to understand when reviewing t
 - **Delayed retries with a sorted set.** Failed events are added to `webhooks:delayed`, with `next_attempt_at` as the score. A reaper uses `ZRANGEBYSCORE`, `ZREM` and `LPUSH` to return due events to the queue. This avoids sleeping inside the worker.
 
 - **Orphan reaper as a sibling task.** A second asyncio task in the worker process scans PostgreSQL every 30s for stale `pending` events (batches of 100, oldest first) using `SELECT ... FOR UPDATE SKIP LOCKED`, so several reapers never double-enqueue. It advances `next_attempt_at` before `LPUSH` to avoid re-picking the same event on the next cycle. A failed cycle is logged and retried; it never stops the worker, and the task is cancelled cleanly on shutdown.
+
+- **Claims are atomic.** The worker locks the event row (`SELECT ... FOR UPDATE`) before claiming it, and skips any event that is no longer `pending`. A duplicate queue entry, whether from a re-enqueue or a retry promoted twice, is dropped instead of delivered again, and two workers popping the same id deliver it once. Delivery stays at-least-once in the face of crashes and timeouts, but HookRelay no longer creates duplicates itself.
 
 - **Claim timeout from `updated_at`, no extra column.** `mark_in_progress` is the last write to an `in_progress` row, so `updated_at` already records the claim time. The 120s timeout is roughly five times the worst-case HTTP timeout, so a slow but live worker is not preempted. If one ever were, the event could be delivered twice, which at-least-once delivery already allows.
 
