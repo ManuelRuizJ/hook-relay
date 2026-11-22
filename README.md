@@ -8,7 +8,7 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
 ## Status
 
-✅ v1.0.2: all 6 phases complete, plus idempotent ingestion, API key authentication and a load test.
+✅ v1.1.0: all 6 phases complete, plus idempotent ingestion, API key authentication, a load test and a Grafana dashboard.
 
 ## Roadmap
 
