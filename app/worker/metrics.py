@@ -20,8 +20,26 @@ DELIVERIES = Counter(
 DELIVERY_DURATION = Histogram(
     "hookrelay_delivery_duration_seconds",
     "Duration of the HTTP POST to the receiver, including failed attempts.",
-    # Up to the worst-case HTTP timeout (~25s).
-    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25),
+    # From a receiver on the same network (about 1ms) up to the
+    # worst-case HTTP timeout (~25s). With 50ms as the lowest bound, every
+    # fast delivery landed in the first bucket and the quantiles were
+    # interpolation artifacts (always 25ms and 47.5ms), not measurements.
+    buckets=(
+        0.001,
+        0.0025,
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2.5,
+        5,
+        10,
+        25,
+    ),
 )
 REAPER_RECOVERED = Counter(
     "hookrelay_reaper_recovered_total",

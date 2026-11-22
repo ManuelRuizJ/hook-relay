@@ -204,6 +204,27 @@ async def test_handle_event_counts_delivery_outcome(
     assert sample("hookrelay_delivery_duration_seconds_count") == timed_before + 1
 
 
+async def test_delivery_duration_resolves_fast_receivers(db_engine, redis_client):
+    """A fast delivery lands in a bucket below 50ms, so quantiles are real.
+
+    The histogram used to start at 50ms: every local delivery fell in the
+    first bucket and the dashboard showed interpolated, constant p50/p95.
+    """
+    Session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with Session() as session:
+        event = await _seed_event(session, url="http://receiver.example/hooks")
+        event_id = event.id
+
+    fast_before = sample("hookrelay_delivery_duration_seconds_bucket", le="0.01")
+
+    transport = httpx.MockTransport(lambda req: httpx.Response(200))
+    async with httpx.AsyncClient(transport=transport) as client:
+        await _handle_event(client, str(event_id))
+
+    fast_after = sample("hookrelay_delivery_duration_seconds_bucket", le="0.01")
+    assert fast_after == fast_before + 1
+
+
 async def test_delivery_identifies_hookrelay_version(db_engine, redis_client):
     """Receivers see the same version the API reports in its OpenAPI docs."""
     from app import __version__
