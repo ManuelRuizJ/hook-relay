@@ -4,7 +4,7 @@
 
 A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 
-> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotent ingestion, API key authentication, a dead-letter queue, structured logging, Prometheus metrics, CI and a reproducible load test.
+> Portfolio project for backend/infrastructure roles. Demonstrates multi-stage Docker builds, healthchecks, background workers, retries with exponential backoff, idempotent ingestion, API key authentication, a dead-letter queue, structured logging, Prometheus metrics with a Grafana dashboard, CI and a reproducible load test.
 
 ## Status
 
@@ -22,6 +22,7 @@ A webhook delivery service built with FastAPI, PostgreSQL and Redis.
 - [x] Reliability: orphan and stuck-claim recovery
 - [x] Dead-letter queue
 - [x] Observability: JSON logs, Prometheus metrics, readiness probe
+- [x] Grafana dashboard
 - [x] CI
 
 ## Architecture
@@ -72,6 +73,9 @@ export HOOKRELAY_API_KEY=$(docker compose exec -T api \
 
 # 7. Open the interactive API documentation ("Authorize" accepts the key)
 xdg-open http://localhost:8000/docs
+
+# 8. Optional: Prometheus and the Grafana dashboard (http://localhost:3000)
+docker compose --profile monitoring up -d
 ```
 
 If port 8000 is taken on your machine, set `API_PORT` in `.env` (for example `API_PORT=8080`) and use that port in the URLs below.
@@ -90,6 +94,8 @@ docker compose -f docker-compose.yml up --build -d
 | `worker` | BRPOP loop, delivers events, retries and reaper; serves its own `/metrics`. Scale with `--scale worker=N` | `9100` (published in dev only) |
 | `db` | PostgreSQL 16 | Internal |
 | `redis` | Redis 7 (queue + delayed sorted set) | Internal |
+| `prometheus` | Scrapes the API and every worker replica. Optional: `monitoring` profile | `9090` (`PROMETHEUS_PORT`) |
+| `grafana` | Provisioned HookRelay dashboard. Optional: `monitoring` profile | `3000` (`GRAFANA_PORT`) |
 
 ## API
 
@@ -267,21 +273,12 @@ The API and the worker are separate processes, so each exposes its own Prometheu
 | | | `hookrelay_events{status}` | Events per status; `status="failed"` is the DLQ size |
 | Worker | `:9100/metrics` | `hookrelay_deliveries_total{outcome="delivered"\|"retry"\|"failed"}` | Delivery outcomes |
 | | | `hookrelay_delivery_duration_seconds` | Time of the POST to the receiver |
+| | | `hookrelay_deliveries_skipped_total` | Queue entries skipped because the event was no longer `pending` (a duplicate entry, never delivered twice) |
 | | | `hookrelay_reaper_recovered_total{kind}` | `orphaned`, `stuck_rescheduled`, `stuck_failed` |
 | | | `hookrelay_reaper_errors_total{pass_name}` | Reaper passes that raised |
 | | | `hookrelay_worker_loop_errors_total` | Main-loop iterations retried after an outage |
 
 Queue depth and events by status are read from Redis and PostgreSQL at scrape time, so they always match the source of truth.
-
-Example Prometheus scrape configuration on the Compose network:
-
-```yaml
-scrape_configs:
-  - job_name: hookrelay-api
-    static_configs: [{targets: ["api:8000"]}]
-  - job_name: hookrelay-worker
-    static_configs: [{targets: ["worker:9100"]}]
-```
 
 Useful queries:
 
@@ -296,6 +293,24 @@ histogram_quantile(0.95, sum by (le) (rate(hookrelay_delivery_duration_seconds_b
 # Dead-letter queue size (alert when > 0)
 hookrelay_events{status="failed"}
 ```
+
+### Dashboard
+
+Prometheus and Grafana ship as an optional Compose profile, so the default stack stays four containers:
+
+```bash
+docker compose --profile monitoring up -d
+```
+
+Grafana opens the HookRelay dashboard at <http://localhost:3000> without a login (read-only anonymous access; the admin login is `admin` / `GRAFANA_ADMIN_PASSWORD`). Prometheus is at <http://localhost:9090>. Both are configured from files in [`monitoring/`](monitoring/): the scrape configuration discovers every worker replica through Docker's DNS, so `--scale worker=N` needs no change, and the dashboard JSON in the repo is the source of truth (edits in the UI are disabled).
+
+![HookRelay dashboard in Grafana: k6 sending 60, then 180, then 120 events/s to the production stack with 2 workers](docs/images/dashboard.png)
+
+*k6 sending 60, then 180, then 120 events/s with 2 workers. Every delivery succeeds; at 180/s ingestion outpaces delivery and the backlog builds up in Redis, then drains.*
+
+The dashboard shows events received, delivery success, the DLQ size and the Redis backlog at a glance, then throughput by outcome, the events still open in PostgreSQL, ingest and receiver latency percentiles, API errors, and reaper recoveries next to skipped duplicate entries. Reaper recoveries with no worker crash are a sign of trouble: that pattern is how the duplicate-delivery bug fixed in v1.0.2 was found.
+
+Anonymous access is meant for a laptop. Set `GF_AUTH_ANONYMOUS_ENABLED: "false"` in `docker-compose.yml` and a real `GRAFANA_ADMIN_PASSWORD` before exposing Grafana to anyone else.
 
 ### Health probes
 
@@ -494,6 +509,18 @@ Redis or PostgreSQL is unreachable. The worker keeps retrying with backoff (up t
 ```bash
 curl -s localhost:8000/health/ready
 docker compose ps
+```
+
+### Prometheus exits with `not a directory` on its config mount
+
+Docker restarted the monitoring containers while the checkout had no `monitoring/` (for example after a reboot while an older branch was checked out). It then created empty, root-owned directories in place of the config files. Remove them and recreate the containers from a checkout that has the files:
+
+```bash
+docker compose --profile monitoring rm -sf prometheus grafana
+git status --short monitoring/   # must print nothing: the next line deletes the folder
+docker run --rm -v "$PWD":/w alpine:3.20 rm -rf /w/monitoring   # root-owned, so remove from a container
+git checkout -- monitoring/
+docker compose --profile monitoring up -d
 ```
 
 ### Two workers are processing the queue
